@@ -11,6 +11,7 @@ setup(
     long_description_content_type="text/markdown",
     author="Your Name",
     packages=[
+        "config",
         "execution",
         "features",
         "models",

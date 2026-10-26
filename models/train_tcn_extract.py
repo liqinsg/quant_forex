@@ -6,7 +6,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from data.fetch_oanda import update_csv
 from features.build_features import add_ta_features
 import os, pandas as pd, numpy as np, pickle, yaml, torch, torch.nn as nn
-with open("config/config.yaml") as f: CFG = yaml.safe_load(f)
+from config import load_config, model_dir, REPORTS_DIR
+CFG = load_config()
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 SEQ_LEN = CFG.get("lookback_seq_len", 64)
 
@@ -25,7 +26,7 @@ class TemporalConvNet(nn.Module):
     def forward(self, x):
         return self.head(self.net(x)[:,:,-1])
 
-def train_tcn_encoder(instrument, df):
+def train_tcn_encoder(instrument, df, env=None):
     from sklearn.preprocessing import StandardScaler
     cols = ["open","high","low","close","ta_return_1"]
     scaler = StandardScaler()
@@ -49,11 +50,13 @@ def train_tcn_encoder(instrument, df):
     seq_df = pd.DataFrame(feats, index=idx, columns=[f"seq_{i:02d}" for i in range(32)])
     
     pkg = {"state": model.state_dict(), "scaler": scaler, "seq_len": SEQ_LEN}
-    with open(f"models/model_store/tcn_{instrument}.pkl", "wb") as f: pickle.dump(pkg, f)
+    out_dir = model_dir(env)
+    os.makedirs(out_dir, exist_ok=True)
+    with open(out_dir / f"tcn_{instrument}.pkl", "wb") as f: pickle.dump(pkg, f)
     return pkg, seq_df
 
-def get_latest_seq_feature(instrument, df):
-    with open(f"models/model_store/tcn_{instrument}.pkl", "rb") as f: pkg = pickle.load(f)
+def get_latest_seq_feature(instrument, df, env=None):
+    with open(model_dir(env) / f"tcn_{instrument}.pkl", "rb") as f: pkg = pickle.load(f)
     model = TemporalConvNet(); model.load_state_dict(pkg["state"])
     model.to(DEVICE).eval()
     cols = ["open","high","low","close","ta_return_1"]
@@ -70,4 +73,6 @@ if __name__ == "__main__":
     df = update_csv(inst)
     df = add_ta_features(df)
     _, sdf = train_tcn_encoder(inst, df)
-    if sdf is not None: sdf.to_csv(f"reports/seq_{inst}.csv")
+    if sdf is not None:
+        os.makedirs(REPORTS_DIR, exist_ok=True)
+        sdf.to_csv(REPORTS_DIR / f"seq_{inst}.csv")

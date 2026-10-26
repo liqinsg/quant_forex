@@ -1,5 +1,5 @@
 import oandapyV20.endpoints.orders as orders, oandapyV20.endpoints.positions as positions
-from config_oanda import get_oanda_profile
+from config.config_oanda import get_oanda_profile
 
 def get_client():
     return get_oanda_profile()["oanda_client"]

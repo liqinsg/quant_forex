@@ -1,7 +1,8 @@
 import os, pandas as pd, pytz
 import oandapyV20.endpoints.instruments as instruments
 from datetime import datetime
-from config_oanda import get_oanda_profile
+from config import data_dir
+from config.config_oanda import get_oanda_profile
 
 TZ = pytz.timezone(os.getenv("TIMEZONE", "Asia/Singapore"))
 # 首次建库回溯月数（须 >= lgb 训练窗口 + 验证窗口，当前 24+3=27）
@@ -53,10 +54,11 @@ def fetch_candles(instrument, granularity="H1", count=5000, since=None, lookback
     df = pd.concat(frames).sort_index()
     return df[~df.index.duplicated(keep="last")]
 
-def update_csv(instrument, granularity="H1", lookback_months=DEFAULT_LOOKBACK_MONTHS):
-    path = f"data/datasets/{instrument}_{granularity}.csv"
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    if os.path.exists(path):
+def update_csv(instrument, granularity="H1", lookback_months=DEFAULT_LOOKBACK_MONTHS, env=None):
+    """增量更新 CSV 到 data/<env>/datasets/（env 缺省取当前 OANDA 环境）。"""
+    path = data_dir(env) / f"{instrument}_{granularity}.csv"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if path.exists():
         df_exist = pd.read_csv(path, index_col="time", parse_dates=["time"])
         df_exist.index = pd.DatetimeIndex(df_exist.index).tz_convert(TZ)
         df_new = fetch_candles(instrument, granularity, since=df_exist.index[-1])

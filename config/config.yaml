@@ -4,10 +4,11 @@ bar_count: 5000
 lookback_seq_len: 64
 timezone: Asia/Singapore
 
-instruments:
-  - EUR_USD
-  - GBP_USD
-  - USD_JPY
+data:
+  # practice 拉取的数据默认不与 live 混用；仅当手动运行
+  # tools/migrate_data_to_live.sh 明确确认后才置为 true。
+  # ⚠️ 迁移数据 ≠ 实盘表现，上实盘前建议先跑 2–4 周原生 live 数据。
+  allow_practice_for_live: false
 
 risk:
   max_capital_risk_per_trade_pct: 1.0

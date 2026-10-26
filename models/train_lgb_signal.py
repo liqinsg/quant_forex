@@ -7,13 +7,14 @@ from data.fetch_oanda import update_csv
 from features import build_features
 import os, yaml, pandas as pd, numpy as np, lightgbm as lgb, pickle
 from sklearn.metrics import roc_auc_score
-with open("config/config.yaml") as f: CFG = yaml.safe_load(f)
+from config import load_config, model_dir
+CFG = load_config()
 
-def load_model(instrument):
-    with open(f"models/model_store/lgb_{instrument}.pkl", "rb") as f: return pickle.load(f)
+def load_model(instrument, env=None):
+    with open(model_dir(env) / f"lgb_{instrument}.pkl", "rb") as f: return pickle.load(f)
 
-def run_full_training(instrument):
-    df = update_csv(instrument, CFG["granularity"])
+def run_full_training(instrument, env=None):
+    df = update_csv(instrument, CFG["granularity"], env=env)
     df = build_features.add_ta_features(df)
     df = build_features.make_label(df)
     feats = build_features.FEATURE_COLS  # add_ta_features 后才被赋值，须在调用后取
@@ -42,8 +43,9 @@ def run_full_training(instrument):
     best = models[np.argmax(aucs)]
     pkg = {"model": best, "feature_cols": feats, "instrument": instrument,
            "trained_at": pd.Timestamp.now().isoformat(), "mean_auc": np.mean(aucs)}
-    os.makedirs("models/model_store", exist_ok=True)
-    with open(f"models/model_store/lgb_{instrument}.pkl", "wb") as f: pickle.dump(pkg, f)
+    out_dir = model_dir(env)
+    os.makedirs(out_dir, exist_ok=True)
+    with open(out_dir / f"lgb_{instrument}.pkl", "wb") as f: pickle.dump(pkg, f)
     print(f"Mean AUC: {np.mean(aucs):.4f} — saved lgb_{instrument}.pkl")
 
 if __name__ == "__main__":

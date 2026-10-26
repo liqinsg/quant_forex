@@ -39,8 +39,8 @@ Do not hardcode these values elsewhere in the codebase.
     Example usage:
         profile = get_oanda_profile()
         print(profile["env"], profile["token"], profile["account_ids"])
-        python config_oanda.py --env demo --summary
-        python config_oanda.py --env live --summary
+        python config/config_oanda.py --env demo --summary
+        python config/config_oanda.py --env live --summary
 """
 import os
 import re

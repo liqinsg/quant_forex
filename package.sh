@@ -19,11 +19,10 @@ zip -r "$OUTPUT" . \
   -x "*/__pycache__/*" \
   -x "*.pyc" \
   -x ".venv/*" \
-  -x "./.env" \
-  -x "./data/datasets/*" \
-  -x "./models/model_store/*" \
+  -x "./config/.env" \
+  -x "./data/*/datasets/*" \
+  -x "./models/model_store/*/*" \
   -x "./reports/*" \
-  -x "./bot.pid" \
   -x "./nohup.out" \
   -x "*.zip"
 
