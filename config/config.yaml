@@ -1,0 +1,52 @@
+mode: paper
+granularity: H1
+bar_count: 5000
+lookback_seq_len: 64
+timezone: Asia/Singapore
+
+instruments:
+  - EUR_USD
+  - GBP_USD
+  - USD_JPY
+
+risk:
+  max_capital_risk_per_trade_pct: 1.0
+  max_daily_drawdown_pct: 2.0
+  max_total_drawdown_pct: 15.0
+  var_confidence: 0.95
+  vol_threshold_annual: 0.15
+  stop_loss_atr_multiplier: 1.5
+  take_profit_rr_ratio: 1.8
+
+signal:
+  prob_long_threshold: 0.65
+  prob_short_threshold: 0.35
+  neutral_band: 0.05
+
+garch:
+  p: 1
+  q: 1
+  forecast_horizon: 1
+
+lgb:
+  train_window_months: 24
+  valid_window_months: 3
+  retrain_interval_days: 7
+  hyperparams:
+    objective: binary
+    metric: auc
+    learning_rate: 0.03
+    num_leaves: 31
+    feature_fraction: 0.7
+    bagging_fraction: 0.8
+    bagging_freq: 5
+    min_data_in_leaf: 50
+    lambda_l2: 1.5
+    verbosity: -1
+
+monitor:
+  psi_warning: 0.20
+  psi_critical: 0.25
+  ks_min_acceptable: 0.20
+  sharpe_min_paper: 1.0
+  sharpe_min_live: 1.3
