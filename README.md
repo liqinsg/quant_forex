@@ -1,5 +1,5 @@
 
-# Forex OANDA Bot v6.8x
+# Forex OANDA Bot v7x
 
 AI-powered automated trading bot for OANDA — LightGBM + TCN + GARCH + Drift Monitoring
 
