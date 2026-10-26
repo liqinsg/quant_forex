@@ -41,19 +41,36 @@ setup_env() {
     fi
 }
 
+# 选择解释器：.venv 装了依赖就用它，否则沿用当前 PATH 的 python（如 conda 环境）
+PY_BIN=""
+use_python() {
+    if [[ -x .venv/bin/python ]] && .venv/bin/python -c "import yaml, pandas, lightgbm" &>/dev/null; then
+        PY_BIN="$PWD/.venv/bin/python"
+        log_info "Python: $PY_BIN (.venv)"
+    else
+        PY_BIN="$(command -v python || command -v python3 || true)"
+        [[ -n "$PY_BIN" ]] || { log_err "No python found"; exit 1; }
+        log_warn "跳过空的 .venv，使用当前环境: $PY_BIN"
+    fi
+}
+
 train_all() {
-    source .venv/bin/activate
+    use_python
     for inst in EUR_USD GBP_USD USD_JPY; do
         log_info "Training $inst..."
-        python models/train_lgb_signal.py "$inst"
+        "$PY_BIN" models/train_lgb_signal.py "$inst"
     done
     log_info "All trained ✅"
 }
 
 start_daemon() {
-    source .venv/bin/activate
-    [[ -f bot.pid ]] && { log_warn "Running: PID $(cat bot.pid)"; return; }
-    nohup python main_loop_v2.py > reports/nohup.out 2>&1 &
+    use_python
+    if [[ -f bot.pid ]] && kill -0 "$(cat bot.pid)" 2>/dev/null; then
+        log_warn "Running: PID $(cat bot.pid)"; return
+    fi
+    rm -f bot.pid
+    mkdir -p reports
+    nohup "$PY_BIN" main_loop_v2.py > reports/nohup.out 2>&1 &
     echo $! > bot.pid
     log_info "Daemon started — PID $(cat bot.pid)"
 }
@@ -79,7 +96,7 @@ case "${1:-init}" in
     init) check_python; install_sys_deps; setup_venv; install_python_deps; setup_dirs; setup_env; show_menu ;;
     deps) setup_venv; install_python_deps ;;
     train) train_all ;;
-    start) source .venv/bin/activate; python main_loop_v2.py ;;
+    start) use_python; "$PY_BIN" main_loop_v2.py ;;
     daemon) start_daemon ;;
     stop) stop_daemon ;;
     status) [[ -f bot.pid ]] && echo "PID $(cat bot.pid)" || echo "Not running" ;;

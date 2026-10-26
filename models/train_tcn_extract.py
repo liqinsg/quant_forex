@@ -1,6 +1,10 @@
 # 文件顶部改导入路径
-from ..data.fetch_oanda import update_csv
-from ..features.build_features import add_ta_features
+import sys
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+from data.fetch_oanda import update_csv
+from features.build_features import add_ta_features
 import os, pandas as pd, numpy as np, pickle, yaml, torch, torch.nn as nn
 with open("config/config.yaml") as f: CFG = yaml.safe_load(f)
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")

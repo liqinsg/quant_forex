@@ -12,6 +12,13 @@ import yaml
 import logging
 import pandas as pd
 from datetime import datetime
+from config_oanda import get_oanda_profile, is_market_open
+
+profile = get_oanda_profile()
+OANDA_ACCOUNT_ID = profile["account_ids"][0]
+OANDA_TOKEN = profile["token"]
+OANDA_ENV = profile["env"]
+api = profile["oanda_client"]
 
 logging.basicConfig(
     level=logging.INFO,
@@ -28,11 +35,11 @@ with open(PROJECT_ROOT / "config" / "config.yaml") as f:
     CFG = yaml.safe_load(f)
 
 # 导入：从 forex_oanda 包加载
-from forex_oanda.data.fetch_oanda import update_csv
-from forex_oanda.features.build_features import add_ta_features
-from forex_oanda.models.train_lgb_signal import load_model
-from forex_oanda.execution.oanda_conn import place_market_order, close_position, get_open_position
-from forex_oanda.execution.risk_gate import enhanced_risk_check, circuit
+from data.fetch_oanda import update_csv
+from features.build_features import add_ta_features
+from models.train_lgb_signal import load_model
+from execution.oanda_conn import place_market_order, close_position, get_open_position
+from execution.risk_gate import enhanced_risk_check, circuit
 from arch import arch_model
 
 BALANCE = 5000.0
@@ -56,7 +63,7 @@ def main_cycle(inst):
 
     # TCN 融合（存在即启用）
     try:
-        from forex_oanda.models.train_tcn_extract import get_latest_seq_feature
+        from models.train_tcn_extract import get_latest_seq_feature
         sf = get_latest_seq_feature(inst, df)
         for k, v in sf.items():
             latest[k] = v

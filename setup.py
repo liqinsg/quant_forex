@@ -1,4 +1,4 @@
-from setuptools import setup, find_packages
+from setuptools import setup
 
 with open("README.md", "r", encoding="utf-8") as f:
     long_description = f.read()
@@ -10,7 +10,13 @@ setup(
     long_description=long_description,
     long_description_content_type="text/markdown",
     author="Your Name",
-    packages=find_packages(),  # 自动发现 forex_oanda/ 下所有子包
+    packages=[
+        "execution",
+        "features",
+        "models",
+        "validation",
+        "data",
+    ],
     install_requires=[
         "pandas==2.2.3",
         "numpy==1.26.4",
