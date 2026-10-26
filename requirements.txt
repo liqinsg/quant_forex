@@ -1,0 +1,14 @@
+pandas==2.2.3
+numpy==1.26.4
+pyyaml==6.0.2
+python-dotenv==1.0.1
+pytz==2026.1
+oandapyV20==0.7.0
+arch==7.2.0
+# TA-Lib==0.4.28  ← 注释掉
+pandas-ta==0.3.14b0  # ← 纯Python替代
+scipy==1.14.1
+scikit-learn==1.5.2
+lightgbm==4.5.0
+xgboost==2.0.3
+torch==2.5.1
