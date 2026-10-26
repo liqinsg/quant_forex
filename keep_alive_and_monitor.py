@@ -5,10 +5,18 @@ import datetime
 import logging
 
 SHARED = os.path.expanduser("~/forex_shared")
-LOG_FILE = os.path.join(SHARED, "reports", "bot.log")
+
+# 智能找 reports：优先根目录/reports，没有就试 forex_oanda/reports
+POSSIBLE_LOG_PATHS = [
+    os.path.join(SHARED, "reports", "bot.log"),                  # ✅ 标准位置
+    os.path.join(SHARED, "forex_oanda", "reports", "bot.log"),   # 备选位置
+]
+
 HEARTBEAT_LOCAL = os.path.expanduser("~/forex_alive.log")
 MAX_SILENCE_HRS = 2
 CHECK_INTERVAL = 600
+
+os.makedirs(os.path.dirname(HEARTBEAT_LOCAL), exist_ok=True)
 
 logging.basicConfig(
     level=logging.INFO,
@@ -17,12 +25,32 @@ logging.basicConfig(
 )
 log = logging.getLogger()
 
+def find_bot_log():
+    """自动找到 bot.log 真实位置"""
+    for path in POSSIBLE_LOG_PATHS:
+        dir_path = os.path.dirname(path)
+        if os.path.exists(dir_path):
+            if os.path.exists(path):
+                return path, "found"
+            else:
+                return dir_path, "dir_exists_no_file"
+    return None, "not_found"
+
 def check_master():
-    if not os.path.exists(LOG_FILE):
-        log.warning("❌ 共享未就绪或文件不存在")
-        return False, "mount_missing"
-    mtime = os.path.getmtime(LOG_FILE)
+    path, status = find_bot_log()
+    
+    if status == "not_found":
+        log.info("⏳ 等待高配机首次运行生成目录...")
+        return False, "waiting_dir"
+    
+    if status == "dir_exists_no_file":
+        log.info(f"⏳ 目录就绪，等待 bot.log 首次写入...")
+        return False, "waiting_first_log"
+    
+    # 找到日志，检查更新时间
+    mtime = os.path.getmtime(path)
     elapsed = (time.time() - mtime) / 3600
+    
     if elapsed < MAX_SILENCE_HRS:
         log.info(f"✅ 高配机正常 — 最后活动: {elapsed:.1f}小时前")
         return True, "ok"
@@ -34,7 +62,7 @@ def net_heartbeat():
     try:
         import urllib.request
         urllib.request.urlopen("https://cloud.oracle.com", timeout=8)
-    except:
+    except Exception:
         pass
 
 if __name__ == "__main__":
