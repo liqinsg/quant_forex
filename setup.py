@@ -19,7 +19,7 @@ setup(
         "pytz==2026.1",
         "oandapyV20==0.7.0",
         "arch==7.2.0",
-        "TA-Lib==0.4.28",
+        "TA-Lib==0.8.2",
         "scipy==1.14.1",
         "scikit-learn==1.5.2",
         "lightgbm==4.5.0",
