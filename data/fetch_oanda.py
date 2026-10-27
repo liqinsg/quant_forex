@@ -3,6 +3,9 @@ import oandapyV20.endpoints.instruments as instruments
 from datetime import datetime
 from config import data_dir
 from config.config_oanda import get_oanda_profile
+from utils.logging_utils import get_logger
+
+log = get_logger("fetch_oanda")
 
 TZ = pytz.timezone(os.getenv("TIMEZONE", "Asia/Singapore"))
 # 首次建库回溯月数（须 >= lgb 训练窗口 + 验证窗口，当前 24+3=27）
@@ -55,16 +58,34 @@ def fetch_candles(instrument, granularity="H1", count=5000, since=None, lookback
     return df[~df.index.duplicated(keep="last")]
 
 def update_csv(instrument, granularity="H1", lookback_months=DEFAULT_LOOKBACK_MONTHS, env=None):
-    """增量更新 CSV 到 data/<env>/datasets/（env 缺省取当前 OANDA 环境）。"""
+    """增量更新 CSV 到 data/<env>/datasets/（env 缺省取当前 OANDA 环境）。
+
+    已存在的 CSV 若为空或损坏（如上次训练被中断写坏），自动按全量重建，
+    避免 pd.read_csv 抛 EmptyDataError 中断整批训练。
+    """
     path = data_dir(env) / f"{instrument}_{granularity}.csv"
     path.parent.mkdir(parents=True, exist_ok=True)
-    if path.exists():
-        df_exist = pd.read_csv(path, index_col="time", parse_dates=["time"])
-        df_exist.index = pd.DatetimeIndex(df_exist.index).tz_convert(TZ)
+
+    df_exist = None
+    if path.exists() and path.stat().st_size > 0:
+        try:
+            df_exist = pd.read_csv(path, index_col="time", parse_dates=["time"])
+            df_exist.index = pd.DatetimeIndex(df_exist.index).tz_convert(TZ)
+        except (pd.errors.EmptyDataError, pd.errors.ParserError, ValueError) as e:
+            log.warning(f"⚠️ {path.name} 无法解析（{e}），将按全量重建")
+            df_exist = None
+
+    if df_exist is not None and len(df_exist) > 0:
         df_new = fetch_candles(instrument, granularity, since=df_exist.index[-1])
         df = pd.concat([df_exist, df_new])
         df = df[~df.index.duplicated(keep="last")].sort_index()
     else:
+        if path.exists():
+            log.warning(f"⚠️ {path.name} 为空，按全量重建")
         df = fetch_candles(instrument, granularity, lookback_months=lookback_months)
-    df.to_csv(path)
+
+    # 原子写入：先写临时文件再替换，避免中途中断留下 0 字节 CSV
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    df.to_csv(tmp)
+    os.replace(tmp, path)
     return df
