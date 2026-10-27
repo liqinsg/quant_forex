@@ -452,7 +452,12 @@ if __name__ == "__main__":
         )
         sys.exit(1)
     log.info(f"账号: {OANDA_ENV.upper()} #{ARGS.account} → {OANDA_ACCOUNT_ID}")
-    log.info(f"下单手数: {LOT_SIZE} units")
+    if TRADE_MODE == "crypto":
+        log.info("下单手数: %s units(加密)", _fmt_units(CRYPTO_LOT_SIZE))
+    else:
+        log.info(f"下单手数: {LOT_SIZE} units")
+        if TRADE_MODE == "forex-crypto":
+            log.info("加密下单手数: %s units", _fmt_units(CRYPTO_LOT_SIZE))
     if TRADE_MODE == "crypto":
         log.info(
             "ATR 倍数: SL=%s(加密) | TP=%s(加密)", CRYPTO_SL_MULT, CRYPTO_TP_MULT
@@ -492,7 +497,7 @@ if __name__ == "__main__":
     log.info(f"交易模式: {TRADE_MODE}")
     log.info(f"待交易品种: {', '.join(active) or '无'}")
     if TRADE_MODE != "forex":
-        log.info(f"加密手数: {CRYPTO_LOT_SIZE} | 波动率阈值: {CRYPTO_VOL_THRESHOLD}")
+        log.info(f"加密波动率阈值: {CRYPTO_VOL_THRESHOLD}")
 
     all_inst = active
     ready, missing = check_models(all_inst)
