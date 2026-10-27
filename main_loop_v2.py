@@ -1,11 +1,53 @@
 #!/usr/bin/env python3
 """主循环入口 — 放在根目录，直接 python main_loop_v2.py 运行"""
+import os
 import sys
+import argparse
 from pathlib import Path
 
 # 确保项目根目录在路径里
 PROJECT_ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(PROJECT_ROOT))
+
+
+def _parse_args():
+    """CLI 参数：--live 切到实盘；--account/-a 选择账号序号（1-based）。"""
+    parser = argparse.ArgumentParser(description="Forex OANDA 主循环")
+    parser.add_argument(
+        "--live",
+        action="store_true",
+        help="切换到 live 实盘账号（缺省为 demo，无简写）",
+    )
+    parser.add_argument(
+        "--account",
+        "-a",
+        type=int,
+        default=1,
+        metavar="N",
+        help="选择账号序号 N（1-based）；--live 对应 live 账号，缺省对应 demo 账号",
+    )
+    parser.add_argument(
+        "--lots",
+        type=int,
+        default=None,
+        metavar="N",
+        help="下单手数 N（以 unit 计，非合约金额）；缺省读取 run.env 的 "
+        "DEMO_LOT_SIZE/LIVE_LOT_SIZE（demo 10000 / live 1）",
+    )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="空跑模式：正常跑完整流程但不下单/平仓（不发送任何订单）",
+    )
+    return parser.parse_args()
+
+
+ARGS = _parse_args()
+
+# 关键：必须在 import config.config_oanda 之前写死环境，
+# 才能保证 live/demo 各自使用正确的 TOKEN 与账号列表（.env 以 override=False 加载，不会覆盖）
+os.environ["OANDA_ENV"] = "live" if ARGS.live else "practice"
+os.environ["OANDA_ACCOUNT_INDEX"] = str(ARGS.account)
 
 import time
 import warnings
@@ -17,14 +59,32 @@ from utils.logging_utils import get_logger
 from utils.structured_logger import StructuredLogger
 
 profile = get_oanda_profile()
-OANDA_ACCOUNT_ID = profile["account_ids"][0]
+OANDA_ACCOUNT_ID = profile["account_id"]
 OANDA_TOKEN = profile["token"]
 OANDA_ENV = profile["env"]
 api = profile["oanda_client"]
 
-# 中心化日志：主循环用统一 logger，结构化日志记录主动(BOT)操作
+
+def _resolve_lots(cli_lots, env_name):
+    """下单手数(units)解析：--lots > run.env 的 DEMO_LOT_SIZE/LIVE_LOT_SIZE > 缺省(demo 10000 / live 1)。"""
+    if cli_lots is not None:
+        return int(cli_lots)
+    key = "LIVE_LOT_SIZE" if env_name == "live" else "DEMO_LOT_SIZE"
+    raw = os.getenv(key, "").strip()
+    if raw:
+        try:
+            return int(float(raw))
+        except ValueError:
+            pass
+    return 1 if env_name == "live" else 10000
+
+
+LOT_SIZE = _resolve_lots(ARGS.lots, OANDA_ENV)
+DRY_RUN = ARGS.dry_run
+
+# 中心化日志：主循环用统一 logger，结构化日志记录主动(BOT)操作（按环境分文件）
 log = get_logger("main_loop")
-struct_log = StructuredLogger("practice")
+struct_log = StructuredLogger(OANDA_ENV)
 
 # 读配置 — 统一入口（含 forex_pairs.yml 的货币对）
 CFG = load_config()
@@ -33,7 +93,12 @@ CFG = load_config()
 from data.fetch_oanda import update_csv
 from features.build_features import add_ta_features
 from models.train_lgb_signal import load_model, run_full_training
-from execution.oanda_conn import place_market_order, close_position, get_open_position
+from execution.oanda_conn import (
+    place_market_order,
+    close_position,
+    get_open_position,
+    set_dry_run,
+)
 from execution.risk_gate import enhanced_risk_check, circuit
 from arch import arch_model
 from arch.utility.exceptions import (
@@ -42,6 +107,9 @@ from arch.utility.exceptions import (
     InitialValueWarning,
     DataScaleWarning,
 )
+
+# 空跑模式：在执行层拦截所有下单/平仓（应用启动时接线一次即可）
+set_dry_run(DRY_RUN)
 
 # 屏蔽 GARCH(arch) 拟合的收敛/初始值/量纲类警告，避免刷屏
 for _garch_warn in (ConvergenceWarning, StartingValueWarning, InitialValueWarning, DataScaleWarning):
@@ -105,6 +173,13 @@ def main_cycle(inst):
     """处理单个品种。返回本轮计数 {"open": int, "close": int, "observe": int, "fail": int}。"""
     result = {"open": 0, "close": 0, "observe": 0, "fail": 0}
 
+    # 市场停牌检测：不可交易时与 --dry-run 同样的下单/平仓限制，并打 tag=market_halt
+    if not is_market_open(inst, quiet=True):
+        log.info(f"🛑 观望 {inst} | 市场停牌 (tag=market_halt)")
+        struct_log.skip_signal(inst, "market_halt")
+        result["observe"] += 1
+        return result
+
     df = update_csv(inst)
     df = add_ta_features(df)
     latest = df.dropna().iloc[-1:]
@@ -163,10 +238,10 @@ def main_cycle(inst):
         if pos["units"] <= 0:
             sl = close - 1.5 * atr
             tp = close + 1.8 * abs(close - sl)
-            resp = place_market_order(inst, 1000, sl, tp)
+            resp = place_market_order(inst, LOT_SIZE, sl, tp)
             log.info(f"📈 LONG {inst} p={prob:.2f} SL={sl:.5f} TP={tp:.5f}")
             log.info(f"📈 开多仓 {inst} | 概率: {prob:.1%} | 入场价: {close:.4f}")
-            struct_log.bot_open(pair=inst, direction="LONG", units=1000, entry_price=close,
+            struct_log.bot_open(pair=inst, direction="LONG", units=LOT_SIZE, entry_price=close,
                                 trade_id=_extract_open_trade_id(resp), sl=sl, tp=tp,
                                 score_final=prob)
             result["open"] += 1
@@ -187,10 +262,10 @@ def main_cycle(inst):
         if pos["units"] >= 0:
             sl = close + 1.5 * atr
             tp = close - 1.8 * abs(sl - close)
-            resp = place_market_order(inst, -1000, sl, tp)
+            resp = place_market_order(inst, -LOT_SIZE, sl, tp)
             log.info(f"📉 SHORT {inst} p={prob:.2f} SL={sl:.5f} TP={tp:.5f}")
             log.info(f"📉 开空仓 {inst} | 概率: {prob:.1%} | 入场价: {close:.4f}")
-            struct_log.bot_open(pair=inst, direction="SHORT", units=-1000, entry_price=close,
+            struct_log.bot_open(pair=inst, direction="SHORT", units=-LOT_SIZE, entry_price=close,
                                 trade_id=_extract_open_trade_id(resp), sl=sl, tp=tp,
                                 score_final=prob)
             result["open"] += 1
@@ -210,6 +285,18 @@ def main_cycle(inst):
 if __name__ == "__main__":
     log.info("🚀 Bot v6.8x STARTED")
     log.info(f"环境: {current_env()} | 模型目录: {MODEL_DIR}")
+
+    n_accounts = len(profile["account_ids"])
+    if not (1 <= ARGS.account <= n_accounts):
+        log.error(
+            f"❌ --account {ARGS.account} 超出范围: 当前 {OANDA_ENV.upper()} 环境有 "
+            f"{n_accounts} 个账号，可选 1..{n_accounts}"
+        )
+        sys.exit(1)
+    log.info(f"账号: {OANDA_ENV.upper()} #{ARGS.account} → {OANDA_ACCOUNT_ID}")
+    log.info(f"下单手数: {LOT_SIZE} units")
+    if DRY_RUN:
+        log.warning("🧪 DRY-RUN 模式: 正常运行但不会真正下单/平仓/改单")
 
     all_inst = CFG["instruments"]
     ready, missing = check_models(all_inst)

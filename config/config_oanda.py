@@ -71,6 +71,7 @@ OANDA_ACCOUNT_ID_DEMO_1 = os.getenv("OANDA_ACCOUNT_ID_DEMO_1", "101-003-39389016
 OANDA_ACCOUNT_ID_DEMO_2 = os.getenv("OANDA_ACCOUNT_ID_DEMO_2", "101-003-39389016-002")
 OANDA_ACCOUNT_ID_DEMO_3 = os.getenv("OANDA_ACCOUNT_ID_DEMO_3", "101-003-39389016-003")
 OANDA_ACCOUNT_ID_DEMO_4 = os.getenv("OANDA_ACCOUNT_ID_DEMO_4", "101-003-39389016-004")
+OANDA_ACCOUNT_ID_DEMO_5 = os.getenv("OANDA_ACCOUNT_ID_DEMO_5", "101-003-39389016-005")
 
 OANDA_ACCOUNT_ID_1_LIVE = os.getenv("OANDA_ACCOUNT_ID_1_LIVE", "001-003-21515688-001")
 OANDA_ACCOUNT_ID_2_LIVE = os.getenv("OANDA_ACCOUNT_ID_2_LIVE", "001-003-21515688-002")
@@ -95,15 +96,17 @@ else:
     OANDA_ACCOUNT_ID_2 = OANDA_ACCOUNT_ID_DEMO_2
     OANDA_ACCOUNT_ID_3 = OANDA_ACCOUNT_ID_DEMO_3
     OANDA_ACCOUNT_ID_4 = OANDA_ACCOUNT_ID_DEMO_4
+    OANDA_ACCOUNT_ID_5 = OANDA_ACCOUNT_ID_DEMO_5
 
 OANDA_ACCOUNT_ID = OANDA_ACCOUNT_ID_1
 
 
-def get_oanda_profile(env_override: str = None) -> dict:
+def get_oanda_profile(env_override: str = None, account_index: int = None) -> dict:
     """
     根据运行环境动态返回对应配置 Profile。
     :param env_override: "practice" | "demo" | "live" (若为 None 则强制读取 run.env 中的 OANDA_ENV)
-    :return: 包含 env, token, api, account_ids 的字典
+    :param account_index: 1-based 账号序号；None 时读取环境变量 OANDA_ACCOUNT_INDEX，再缺省为 1
+    :return: 包含 env, token, api, account_id, account_ids 的字典
     """
     # 核心修改 2：实时获取由 run.env 加载的最新 OANDA_ENV，不使用静态缓存
     current_run_env = os.getenv("OANDA_ENV", "practice")
@@ -127,6 +130,16 @@ def get_oanda_profile(env_override: str = None) -> dict:
     account_ids.sort(key=lambda x: x[0])
     account_list = [acc_id for _, acc_id in account_ids]
 
+    # 账号选择：显式参数 > 环境变量 OANDA_ACCOUNT_INDEX (1-based) > 默认第 1 个
+    idx = account_index
+    if idx is None:
+        raw_idx = os.getenv("OANDA_ACCOUNT_INDEX", "").strip()
+        idx = int(raw_idx) if raw_idx.isdigit() else 1
+    if account_list and 1 <= idx <= len(account_list):
+        account_id = account_list[idx - 1]
+    else:
+        account_id = account_list[0] if account_list else None
+
     # 初始化对应环境的 API Client
     oanda_client = None
     if selected_token:
@@ -139,6 +152,7 @@ def get_oanda_profile(env_override: str = None) -> dict:
         "token": selected_token,
         "oanda_client": oanda_client,
         "api": oanda_client,
+        "account_id": account_id,
         "account_ids": account_list,
         "raw_config": account_ids,
     }
@@ -154,7 +168,7 @@ api = default_profile["api"]
 # ────────────────────────────────────────────────────────────────
 
 
-def is_market_open(instrument: str = "EUR_USD", env_override: str = None) -> bool:
+def is_market_open(instrument: str = "EUR_USD", env_override: str = None, quiet: bool = False) -> bool:
     """
     Check whether `instrument` is currently tradeable on OANDA.
 
@@ -166,15 +180,16 @@ def is_market_open(instrument: str = "EUR_USD", env_override: str = None) -> boo
 
     Uses the same profile/client as the rest of this module, so it
     automatically respects OANDA_ENV (demo vs live).
+
+    :param quiet: True 时不打印 [MARKET CHECK] 诊断行（供主循环批量调用）
     """
     profile = get_oanda_profile(env_override)
     client = profile["api"]
-    account_id = (
-        profile["account_ids"][0] if profile["account_ids"] else OANDA_ACCOUNT_ID
-    )
+    account_id = profile["account_id"] or OANDA_ACCOUNT_ID
 
     if not client or not account_id:
-        print("[MARKET CHECK] ❌ No API client / account available (token not set)")
+        if not quiet:
+            print("[MARKET CHECK] ❌ No API client / account available (token not set)")
         return False
 
     try:
@@ -184,13 +199,16 @@ def is_market_open(instrument: str = "EUR_USD", env_override: str = None) -> boo
         )
         prices = resp.get("prices", [])
         if not prices:
-            print(f"[MARKET CHECK] ❌ {instrument}: no pricing data returned")
+            if not quiet:
+                print(f"[MARKET CHECK] ❌ {instrument}: no pricing data returned")
             return False
         tradeable = bool(prices[0].get("tradeable", False))
-        print(f"[MARKET CHECK] {instrument}: {'OPEN' if tradeable else 'CLOSED'}")
+        if not quiet:
+            print(f"[MARKET CHECK] {instrument}: {'OPEN' if tradeable else 'CLOSED'}")
         return tradeable
     except Exception as exc:
-        print(f"[MARKET CHECK] ❌ {instrument}: request failed — {str(exc)[:150]}")
+        if not quiet:
+            print(f"[MARKET CHECK] ❌ {instrument}: request failed — {str(exc)[:150]}")
         return False
 
 

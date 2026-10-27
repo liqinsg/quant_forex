@@ -46,22 +46,41 @@ reports/
   .last_weekly_retrain   # 模型上次更新时间戳
 ```
 
-## 环境切换 (practice / live)
+## 启动参数 (main_loop_v2.py)
 
-改 `config/run.env` 的 `OANDA_ENV`，数据与模型目录随之自动切换：
+主循环通过命令行选择环境 / 账号 / 手数（`deploy.sh start|daemon|restart` 会透传参数）：
+
+| 参数 | 说明 |
+|---|---|
+| `--live` | 切换到 live 实盘账号（无简写）；**不带则一律 demo** |
+| `--account N` / `-a N` | 选择账号序号 N（1-based）：`--live` 对应 live 账号，否则对应 demo 账号 |
+| `--lots N` | 下单手数 N（以 unit 计，非合约金额）；缺省读 `config/run.env` 的 `DEMO_LOT_SIZE`/`LIVE_LOT_SIZE`（demo 10000 / live 1） |
+| `--dry-run` | 空跑模式：正常跑完整流程（拉K线→特征→预测→风控），但**不下单/平仓/改单**（不向 OANDA 发送任何订单） |
+
+市场停牌（HALT）：主循环每轮会实时查询 OANDA 报价的 `tradeable` 状态；当市场停牌/休市
+（周末、假期、HALT）时，该货币对当轮跳过并打 tag=`market_halt`，动作限制与 `--dry-run` 一致。
 
 ```bash
-OANDA_ENV=practice   # 默认 → data/practice/datasets + models/model_store/practice
-OANDA_ENV=live       # 实盘 → data/live/datasets + models/model_store/live
+python main_loop_v2.py                        # demo 账号 1，手数取 DEMO_LOT_SIZE
+python main_loop_v2.py -a 5                   # demo 账号 5
+python main_loop_v2.py --live -a 2 --lots 1   # 实盘账号 2，手数 1
+python main_loop_v2.py --dry-run              # 空跑（不下单/平仓）
+./deploy.sh daemon --live -a 2                # 后台实盘账号 2
 ```
 
-**完整流程**：
+- live / demo 使用**各自独立**的 TOKEN（`OANDA_API_TOKEN_LIVE` / `OANDA_API_TOKEN`），
+  由 `--live` 决定，不会错用。
+- 环境同时决定数据/模型目录与日志：`data/<env>/datasets`、`models/model_store/<env>`、
+  `logs/profile_<env>.jsonl`。
 
-1. 编辑 `config/run.env`，把 `OANDA_ENV` 改为目标环境（如 `live`）
-2. **改完必须重启**守护进程才生效：`./deploy.sh restart`
-3. 目录自动切换：
-   - `practice` → `data/practice/datasets` + `models/model_store/practice`
-   - `live` → `data/live/datasets` + `models/model_store/live`
+## 环境切换 (practice / live)
+
+- **主循环**：由 `--live` 决定（见上），无需改配置文件。
+- **周守护 `weekly_train_daemon.py`**：无 CLI 开关，仍读取 `config/run.env` 的 `OANDA_ENV`。
+  若要让周守护按 live 训练，把 `config/run.env` 的 `OANDA_ENV` 改为 `live` 后 `./deploy.sh restart`。
+- 目录随环境自动切换：
+  - `practice` → `data/practice/datasets` + `models/model_store/practice`
+  - `live` → `data/live/datasets` + `models/model_store/live`
 
 > ⚠️ **首次切到 live 会缺数据**：`data/live/` 与 `models/model_store/live/` 初始为空，
 > 属正常现象。两条路径任选其一：

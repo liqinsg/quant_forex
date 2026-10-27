@@ -81,7 +81,7 @@ start_bot() {
     if pid_alive "$BOT_PID"; then log_warn "主循环已在运行: PID $(cat "$BOT_PID")"; return; fi
     rm -f "$BOT_PID"
     mkdir -p reports
-    nohup "$PY_BIN" main_loop_v2.py > reports/bot_console.out 2>&1 &
+    nohup "$PY_BIN" main_loop_v2.py "$@" > reports/bot_console.out 2>&1 &
     echo $! > "$BOT_PID"
     log_info "主循环已启动 — PID $(cat "$BOT_PID")"
 }
@@ -161,16 +161,20 @@ show_menu() {
     echo "  ./deploy.sh restart      → Restart both"
     echo "  ./deploy.sh status       → Both processes + last model update"
     echo "  ./deploy.sh retrain-now  → Run one full retrain now"
+    echo ""
+    echo "  start/daemon/restart 可透传主循环参数，例如:"
+    echo "    ./deploy.sh daemon --live -a 2 --lots 1"
+    echo "    (--live 实盘 | --account/-a N 账号序号 | --lots N 手数 units)"
 }
 
 case "${1:-init}" in
     init) check_python; install_sys_deps; setup_venv; install_python_deps; setup_dirs; setup_env; show_menu ;;
     deps) setup_venv; install_python_deps ;;
     train) train_all ;;
-    start) use_python; "$PY_BIN" main_loop_v2.py ;;
-    daemon) start_bot; start_weekly ;;
+    start) use_python; "$PY_BIN" main_loop_v2.py "${@:2}" ;;
+    daemon) start_bot "${@:2}"; start_weekly ;;
     stop) stop_all ;;
-    restart) stop_all; start_bot; start_weekly ;;
+    restart) stop_all; start_bot "${@:2}"; start_weekly ;;
     status) status_all ;;
     retrain-now) retrain_now ;;
     *) echo "Usage: $0 [init|deps|train|start|daemon|stop|restart|status|retrain-now]" ;;
