@@ -218,6 +218,7 @@ from execution.oanda_conn import (
     place_market_order,
     close_position,
     get_open_position,
+    has_open_bot_trade,
     set_dry_run,
 )
 from execution.risk_gate import enhanced_risk_check, circuit
@@ -394,6 +395,20 @@ def main_cycle(inst):
                                  pnl=pnl, trade_id=_extract_close_trade_id(resp))
             result["close"] += 1
         if pos["units"] <= 0:
+            if has_open_bot_trade(inst, units):
+                log.info(
+                    f"⏸️ 观望 {inst} | 概率: {prob:.1%} | 阈值: {thr_desc} | 原因: 已有同向 bot 持仓(tag=fx_bot_v7)"
+                )
+                struct_log.skip_signal(
+                    inst,
+                    "duplicate_bot_trade",
+                    detail="same_direction_open_trade",
+                    prob=prob,
+                    prob_long_threshold=long_thr,
+                    prob_short_threshold=short_thr,
+                )
+                result["observe"] += 1
+                return result
             sl = close - _atr_sl_mult_for(inst) * atr
             tp = close + _atr_tp_mult_for(inst) * abs(close - sl)
             resp = place_market_order(inst, units, sl, tp)
@@ -418,6 +433,20 @@ def main_cycle(inst):
                                  pnl=pnl, trade_id=_extract_close_trade_id(resp))
             result["close"] += 1
         if pos["units"] >= 0:
+            if has_open_bot_trade(inst, -units):
+                log.info(
+                    f"⏸️ 观望 {inst} | 概率: {prob:.1%} | 阈值: {thr_desc} | 原因: 已有同向 bot 持仓(tag=fx_bot_v7)"
+                )
+                struct_log.skip_signal(
+                    inst,
+                    "duplicate_bot_trade",
+                    detail="same_direction_open_trade",
+                    prob=prob,
+                    prob_long_threshold=long_thr,
+                    prob_short_threshold=short_thr,
+                )
+                result["observe"] += 1
+                return result
             sl = close + _atr_sl_mult_for(inst) * atr
             tp = close - _atr_tp_mult_for(inst) * abs(sl - close)
             resp = place_market_order(inst, -units, sl, tp)
