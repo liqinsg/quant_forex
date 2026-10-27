@@ -111,7 +111,11 @@ python main_loop_v2.py --dry-run              # 空跑（不下单/平仓）
   OANDA 最小可交易单位：BTC 0.001、ETH 0.01。
 - **价格精度**：下单 SL/TP 精度改为**实时查询** OANDA 品种 `displayPrecision` 并缓存（BTC=1、ETH=2、日元=3、其余=5），
   避免 `TAKE_PROFIT_ON_FILL_PRICE_PRECISION_EXCEEDED`。
-- **风控波动率**：加密使用 `config/config.yaml` 的 `crypto.vol_threshold_annual`（默认 1.0），外汇仍用 `risk.vol_threshold_annual`（0.15）。
+- **信号概率阈值**：默认**沿用外汇**的 `PROB_LONG_THRESHOLD` / `PROB_SHORT_THRESHOLD`（0.65 / 0.35）；
+  若需加密单独收紧或放宽，在 `run.env` 设 `CRYPTO_PROB_LONG_THRESHOLD` / `CRYPTO_PROB_SHORT_THRESHOLD`（留空即继承外汇）。
+  注意它与风控侧的波动率阈值是**两套独立参数**：概率阈值决定「开不开仓」，波动率阈值决定「风控放不放行」。
+- **风控波动率**：加密使用独立阈值 —— `run.env` 的 `CRYPTO_VOL_THRESHOLD`（或 `config.yaml` 的 `crypto.vol_threshold_annual`，默认 1.0），
+  外汇仍用 `risk.vol_threshold_annual`（0.15）；优先级同样 `run.env` > `config.yaml` > 内置默认。
 - **ATR 止损/止盈倍率**：加密使用**独立倍率**以适配更高波动 —— `run.env` 的 `CRYPTO_ATR_SL_MULTIPLIER` / `CRYPTO_ATR_TP_MULTIPLIER`
   （或 `config.yaml` 的 `crypto.atr_sl_multiplier` / `crypto.atr_tp_multiplier`），默认 **2.0 / 2.5**；
   外汇沿用 `STOP_LOSS_ATR_MULTIPLIER` / `TAKE_PROFIT_ATR_MULTIPLIER`（1.5 / 1.8），行为完全不变。

@@ -185,6 +185,13 @@ PROB_LONG_THRESHOLD = _resolve_float(
 PROB_SHORT_THRESHOLD = _resolve_float(
     "PROB_SHORT_THRESHOLD", "signal.prob_short_threshold", 0.35
 )
+# 加密独立信号概率阈值（未配置时自动沿用上面的外汇阈值）
+CRYPTO_PROB_LONG_THRESHOLD = _resolve_float(
+    "CRYPTO_PROB_LONG_THRESHOLD", "crypto.prob_long_threshold", PROB_LONG_THRESHOLD
+)
+CRYPTO_PROB_SHORT_THRESHOLD = _resolve_float(
+    "CRYPTO_PROB_SHORT_THRESHOLD", "crypto.prob_short_threshold", PROB_SHORT_THRESHOLD
+)
 ATR_SL_MULTIPLIER = _resolve_float(
     "STOP_LOSS_ATR_MULTIPLIER", "risk.stop_loss_atr_multiplier", 1.5
 )
@@ -199,7 +206,9 @@ CRYPTO_TP_MULT = _resolve_float(
     "CRYPTO_ATR_TP_MULTIPLIER", "crypto.atr_tp_multiplier", 2.5
 )
 # 加密独立年化波动率阈值（外汇沿用 risk.vol_threshold_annual）
-CRYPTO_VOL_THRESHOLD = float(CFG.get("crypto", {}).get("vol_threshold_annual", 1.0))
+CRYPTO_VOL_THRESHOLD = _resolve_float(
+    "CRYPTO_VOL_THRESHOLD", "crypto.vol_threshold_annual", 1.0
+)
 
 # 导入：从 forex_oanda 包加载
 from data.fetch_oanda import update_csv
@@ -250,6 +259,16 @@ def _atr_sl_mult_for(inst):
 def _atr_tp_mult_for(inst):
     """ATR 止盈倍率：加密用独立 CRYPTO_TP_MULT，外汇用 ATR_TP_MULTIPLIER。"""
     return CRYPTO_TP_MULT if is_crypto(inst) else ATR_TP_MULTIPLIER
+
+
+def _prob_long_thr_for(inst):
+    """做多概率阈值：加密用独立阈值，外汇用 PROB_LONG_THRESHOLD。"""
+    return CRYPTO_PROB_LONG_THRESHOLD if is_crypto(inst) else PROB_LONG_THRESHOLD
+
+
+def _prob_short_thr_for(inst):
+    """做空概率阈值：加密用独立阈值，外汇用 PROB_SHORT_THRESHOLD。"""
+    return CRYPTO_PROB_SHORT_THRESHOLD if is_crypto(inst) else PROB_SHORT_THRESHOLD
 
 
 def _fmt_units(units):
@@ -350,8 +369,8 @@ def main_cycle(inst):
     pos = get_open_position(inst)
     ok, reason = enhanced_risk_check(ann_vol, 0.05, 0.0, 0, CFG, vol_threshold=_vol_threshold_for(inst))
 
-    long_thr = PROB_LONG_THRESHOLD
-    short_thr = PROB_SHORT_THRESHOLD
+    long_thr = _prob_long_thr_for(inst)
+    short_thr = _prob_short_thr_for(inst)
     thr_desc = f"多≥{long_thr:.0%} / 空≤{short_thr:.0%}"
 
     if not ok:
@@ -444,7 +463,20 @@ if __name__ == "__main__":
         )
         if TRADE_MODE == "forex-crypto":
             log.info("加密 ATR 倍数: SL=%s | TP=%s", CRYPTO_SL_MULT, CRYPTO_TP_MULT)
-    log.info("信号阈值: LONG=%s | SHORT=%s", PROB_LONG_THRESHOLD, PROB_SHORT_THRESHOLD)
+    if TRADE_MODE == "crypto":
+        log.info(
+            "信号阈值: LONG=%s(加密) | SHORT=%s(加密)",
+            CRYPTO_PROB_LONG_THRESHOLD,
+            CRYPTO_PROB_SHORT_THRESHOLD,
+        )
+    else:
+        log.info("信号阈值: LONG=%s | SHORT=%s", PROB_LONG_THRESHOLD, PROB_SHORT_THRESHOLD)
+        if TRADE_MODE == "forex-crypto":
+            log.info(
+                "加密信号阈值: LONG=%s | SHORT=%s",
+                CRYPTO_PROB_LONG_THRESHOLD,
+                CRYPTO_PROB_SHORT_THRESHOLD,
+            )
     if DRY_RUN:
         log.warning("🧪 DRY-RUN 模式: 正常运行但不会真正下单/平仓/改单")
 
