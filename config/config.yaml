@@ -17,12 +17,22 @@ risk:
   var_confidence: 0.95
   vol_threshold_annual: 0.15
   stop_loss_atr_multiplier: 1.5
-  take_profit_rr_ratio: 1.8
+  take_profit_atr_multiplier: 1.8
 
 signal:
-  prob_long_threshold: 0.65
-  prob_short_threshold: 0.35
+  prob_long_threshold: 0.65 # long概率阈值 ，超过该概率则下单 # 0.65
+  prob_short_threshold: 0.35 # short概率阈值 ，超过该概率则下单 # 0.35 
   neutral_band: 0.05
+
+crypto:
+  # 加密货币专用的独立参数（外汇沿用 risk.* 与 make_label 默认值）
+  # 年化波动率阈值：加密波动远高于外汇，故放宽到 100%（外汇为 risk.vol_threshold_annual=0.15）
+  vol_threshold_annual: 1.0
+  # 训练标签阈值：未来 3 根K线涨幅超过该比例才标记方向（外汇默认 0.002）
+  label_threshold_pct: 0.01
+  # 加密独立 ATR 止损/止盈倍率（外汇沿用 risk.stop_loss_atr_multiplier / risk.take_profit_atr_multiplier）
+  atr_sl_multiplier: 2.0
+  atr_tp_multiplier: 2.5
 
 garch:
   p: 1

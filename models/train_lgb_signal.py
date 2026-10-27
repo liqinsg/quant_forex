@@ -8,6 +8,7 @@ from features import build_features
 import os, yaml, pandas as pd, numpy as np, lightgbm as lgb, pickle
 from sklearn.metrics import roc_auc_score
 from config import load_config, model_dir
+from config.pairs import is_crypto
 CFG = load_config()
 
 def load_model(instrument, env=None):
@@ -16,7 +17,11 @@ def load_model(instrument, env=None):
 def run_full_training(instrument, env=None):
     df = update_csv(instrument, CFG["granularity"], env=env)
     df = build_features.add_ta_features(df)
-    df = build_features.make_label(df)
+    # 加密波动远高于外汇，使用独立标签阈值（config.yaml 的 crypto.label_threshold_pct）
+    label_kw = {}
+    if is_crypto(instrument):
+        label_kw["threshold_pct"] = CFG.get("crypto", {}).get("label_threshold_pct", 0.01)
+    df = build_features.make_label(df, **label_kw)
     feats = build_features.FEATURE_COLS  # add_ta_features 后才被赋值，须在调用后取
     
     # Walk-Forward

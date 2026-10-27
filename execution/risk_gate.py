@@ -5,11 +5,12 @@ class CircuitBreaker:
     def lift(self): self.halt_until = None
 circuit = CircuitBreaker()
 
-def enhanced_risk_check(ann_vol, dd, daily_pnl, trade_count, cfg):
+def enhanced_risk_check(ann_vol, dd, daily_pnl, trade_count, cfg, vol_threshold=None):
     if circuit.is_halted(): return False, "circuit_breaker"
     r = cfg["risk"]
     reas = []
-    if ann_vol > r["vol_threshold_annual"]: reas.append("vol_too_high")
+    vt = r["vol_threshold_annual"] if vol_threshold is None else vol_threshold
+    if ann_vol > vt: reas.append("vol_too_high")
     if dd > r["max_total_drawdown_pct"]/100: reas.append("max_dd"); circuit.trigger(120)
     if daily_pnl < -r["max_daily_drawdown_pct"]/100: reas.append("daily_limit"); circuit.trigger(240)
     if trade_count > 12: reas.append("too_many_trades")

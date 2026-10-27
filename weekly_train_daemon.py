@@ -40,6 +40,8 @@ log = get_logger("weekly_train")
 
 CFG = load_config()
 INTERVAL_DAYS = CFG["lgb"]["retrain_interval_days"]
+# 训练覆盖外汇 + 加密（加密模型与外汇同样按周期更新）
+INSTRUMENTS = CFG["instruments"] + CFG.get("crypto_instruments", [])
 
 
 def _mark_updated():
@@ -59,7 +61,7 @@ def _train_one(inst):
 
 def update_missing():
     """首次启动：只补训缺失的模型。"""
-    instruments = CFG["instruments"]
+    instruments = INSTRUMENTS
     md = model_dir()
     missing = [i for i in instruments if not (md / f"lgb_{i}.pkl").exists()]
     if not missing:
@@ -78,8 +80,8 @@ def update_missing():
 
 
 def update_all():
-    """周期性：对全部货币对执行增量重训，返回 (成功列表, 失败列表)。"""
-    instruments = CFG["instruments"]
+    """周期性：对全部品种执行增量重训，返回 (成功列表, 失败列表)。"""
+    instruments = INSTRUMENTS
     ok, failed = [], []
     for i, inst in enumerate(instruments, 1):
         log.info(f"🏋️ 周度更新 {inst} ... ({i}/{len(instruments)})")

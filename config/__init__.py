@@ -11,7 +11,7 @@ from pathlib import Path
 
 import yaml
 
-from .pairs import get_instruments
+from .pairs import get_instruments, get_crypto_instruments
 
 CONFIG_FILE = Path(__file__).resolve().parent / "config.yaml"
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -21,10 +21,11 @@ LAST_RETRAIN_FILE = REPORTS_DIR / ".last_weekly_retrain"
 
 
 def load_config() -> dict:
-    """加载 config.yaml，并注入 forex_pairs.yml 的 instruments 列表。"""
+    """加载 config.yaml，并注入 forex_pairs.yml 的 instruments / crypto_instruments 列表。"""
     with open(CONFIG_FILE, encoding="utf-8") as f:
         cfg = yaml.safe_load(f)
     cfg["instruments"] = get_instruments()
+    cfg["crypto_instruments"] = get_crypto_instruments()
     return cfg
 
 

@@ -34,6 +34,39 @@ def _parse_args():
         help="下单手数 N（以 unit 计，非合约金额）；缺省读取 run.env 的 "
         "DEMO_LOT_SIZE/LIVE_LOT_SIZE（demo 10000 / live 1）",
     )
+    _mode = parser.add_mutually_exclusive_group()
+    _mode.add_argument(
+        "--forex",
+        "-f",
+        dest="trade_mode",
+        action="store_const",
+        const="forex",
+        help="只交易外汇（默认）",
+    )
+    _mode.add_argument(
+        "--crypto",
+        "-c",
+        dest="trade_mode",
+        action="store_const",
+        const="crypto",
+        help="只交易加密货币（BTC_USD/ETH_USD）",
+    )
+    _mode.add_argument(
+        "--forex-crypto",
+        "-b",
+        dest="trade_mode",
+        action="store_const",
+        const="forex-crypto",
+        help="外汇与加密同时交易",
+    )
+    parser.add_argument(
+        "--crypto-lots",
+        type=float,
+        default=None,
+        metavar="N",
+        help="加密下单手数 N（以 unit 计，支持小数）；缺省读取 run.env 的 "
+        "DEMO_LOT_SIZE_CRYPTO/LIVE_LOT_SIZE_CRYPTO（demo 1 / live 0.01）",
+    )
     parser.add_argument(
         "--dry-run",
         action="store_true",
@@ -55,6 +88,7 @@ import pandas as pd
 from datetime import datetime
 from config.config_oanda import get_oanda_profile, is_market_open
 from config import load_config, model_dir, current_env, LAST_RETRAIN_FILE
+from config.pairs import is_crypto
 from utils.logging_utils import get_logger
 from utils.structured_logger import StructuredLogger
 
@@ -79,15 +113,93 @@ def _resolve_lots(cli_lots, env_name):
     return 1 if env_name == "live" else 10000
 
 
-LOT_SIZE = _resolve_lots(ARGS.lots, OANDA_ENV)
-DRY_RUN = ARGS.dry_run
+def _resolve_crypto_lots(cli_lots, env_name):
+    """加密手数(units)解析：--crypto-lots > run.env 的 DEMO/LIVE_LOT_SIZE_CRYPTO > 缺省(demo 1 / live 0.01)。
+
+    加密按 unit 计且支持小数（BTC 最小 0.001 / ETH 最小 0.01），故不做 int 截断。
+    """
+    if cli_lots is not None:
+        return float(cli_lots)
+    key = "LIVE_LOT_SIZE_CRYPTO" if env_name == "live" else "DEMO_LOT_SIZE_CRYPTO"
+    raw = os.getenv(key, "").strip()
+    if raw:
+        try:
+            return float(raw)
+        except ValueError:
+            pass
+    return 0.01 if env_name == "live" else 1.0
+
+
+def _resolve_trade_mode(cli_mode):
+    """交易品种模式解析：CLI(--forex/-f | --crypto/-c | --forex-crypto/-b)
+    > run.env 的 TRADE_MODE > 缺省 'forex'。"""
+    if cli_mode:
+        return cli_mode
+    env_val = os.getenv("TRADE_MODE", "").strip().lower()
+    valid = ("forex", "crypto", "forex-crypto")
+    if env_val:
+        if env_val in valid:
+            return env_val
+        log.warning(f"⚠️ TRADE_MODE={env_val} 无效，回退为 forex")
+    return "forex"
+
+
+def _resolve_float(env_key, yaml_path, default):
+    """
+    统一解析配置，优先级：环境变量 > config.yaml > 内置默认值
+    :param env_key: run.env 中的环境变量名，如 "PROB_LONG_THRESHOLD"
+    :param yaml_path: YAML 深层路径，点号分隔，如 "signal.prob_long_threshold"
+    :param default: 兜底默认值
+    :return: float 解析结果
+    """
+    raw = os.getenv(env_key, "").strip()
+    if raw:
+        try:
+            return float(raw)
+        except ValueError:
+            log.warning(f"⚠️ 环境变量 {env_key}={raw} 无效，回退到 YAML")
+
+    node = CFG
+    try:
+        for key in yaml_path.split("."):
+            node = node[key]
+        return float(node)
+    except (KeyError, TypeError, ValueError):
+        return float(default)
+
 
 # 中心化日志：主循环用统一 logger，结构化日志记录主动(BOT)操作（按环境分文件）
 log = get_logger("main_loop")
 struct_log = StructuredLogger(OANDA_ENV)
 
+LOT_SIZE = _resolve_lots(ARGS.lots, OANDA_ENV)
+CRYPTO_LOT_SIZE = _resolve_crypto_lots(ARGS.crypto_lots, OANDA_ENV)
+TRADE_MODE = _resolve_trade_mode(ARGS.trade_mode)
+DRY_RUN = ARGS.dry_run
+
 # 读配置 — 统一入口（含 forex_pairs.yml 的货币对）
 CFG = load_config()
+PROB_LONG_THRESHOLD = _resolve_float(
+    "PROB_LONG_THRESHOLD", "signal.prob_long_threshold", 0.65
+)
+PROB_SHORT_THRESHOLD = _resolve_float(
+    "PROB_SHORT_THRESHOLD", "signal.prob_short_threshold", 0.35
+)
+ATR_SL_MULTIPLIER = _resolve_float(
+    "STOP_LOSS_ATR_MULTIPLIER", "risk.stop_loss_atr_multiplier", 1.5
+)
+ATR_TP_MULTIPLIER = _resolve_float(
+    "TAKE_PROFIT_ATR_MULTIPLIER", "risk.take_profit_atr_multiplier", 1.8
+)
+# 加密独立 ATR 倍率（外汇沿用 ATR_SL_MULTIPLIER / ATR_TP_MULTIPLIER）
+CRYPTO_SL_MULT = _resolve_float(
+    "CRYPTO_ATR_SL_MULTIPLIER", "crypto.atr_sl_multiplier", 2.0
+)
+CRYPTO_TP_MULT = _resolve_float(
+    "CRYPTO_ATR_TP_MULTIPLIER", "crypto.atr_tp_multiplier", 2.5
+)
+# 加密独立年化波动率阈值（外汇沿用 risk.vol_threshold_annual）
+CRYPTO_VOL_THRESHOLD = float(CFG.get("crypto", {}).get("vol_threshold_annual", 1.0))
 
 # 导入：从 forex_oanda 包加载
 from data.fetch_oanda import update_csv
@@ -118,6 +230,32 @@ for _garch_warn in (ConvergenceWarning, StartingValueWarning, InitialValueWarnin
 BALANCE = 5000.0
 MODEL_DIR = model_dir()
 RETRAIN_INTERVAL_DAYS = CFG["lgb"]["retrain_interval_days"]
+
+
+def _units_for(inst):
+    """下单手数：加密用独立 CRYPTO_LOT_SIZE，外汇用 LOT_SIZE。"""
+    return CRYPTO_LOT_SIZE if is_crypto(inst) else LOT_SIZE
+
+
+def _vol_threshold_for(inst):
+    """加密用独立波幅阈值；外汇返回 None（交给 risk_gate 默认逻辑）。"""
+    return CRYPTO_VOL_THRESHOLD if is_crypto(inst) else None
+
+
+def _atr_sl_mult_for(inst):
+    """ATR 止损倍率：加密用独立 CRYPTO_SL_MULT，外汇用 ATR_SL_MULTIPLIER。"""
+    return CRYPTO_SL_MULT if is_crypto(inst) else ATR_SL_MULTIPLIER
+
+
+def _atr_tp_mult_for(inst):
+    """ATR 止盈倍率：加密用独立 CRYPTO_TP_MULT，外汇用 ATR_TP_MULTIPLIER。"""
+    return CRYPTO_TP_MULT if is_crypto(inst) else ATR_TP_MULTIPLIER
+
+
+def _fmt_units(units):
+    """单位数展示：整数值原样转 int（如 10000.0 -> 10000），小数（加密）保留原值。"""
+    units = float(units)
+    return int(units) if units.is_integer() else units
 
 
 def check_models(instruments):
@@ -172,6 +310,7 @@ def _extract_close_trade_id(resp):
 def main_cycle(inst):
     """处理单个品种。返回本轮计数 {"open": int, "close": int, "observe": int, "fail": int}。"""
     result = {"open": 0, "close": 0, "observe": 0, "fail": 0}
+    units = _units_for(inst)
 
     # 市场停牌检测：不可交易时与 --dry-run 同样的下单/平仓限制，并打 tag=market_halt
     if not is_market_open(inst, quiet=True):
@@ -209,10 +348,10 @@ def main_cycle(inst):
     prob = float(pkg["model"].predict(latest[feats])[0])
     ann_vol = calc_garch_vol(df["ta_return_1"].dropna())
     pos = get_open_position(inst)
-    ok, reason = enhanced_risk_check(ann_vol, 0.05, 0.0, 0, CFG)
+    ok, reason = enhanced_risk_check(ann_vol, 0.05, 0.0, 0, CFG, vol_threshold=_vol_threshold_for(inst))
 
-    long_thr = CFG["signal"]["prob_long_threshold"]
-    short_thr = CFG["signal"]["prob_short_threshold"]
+    long_thr = PROB_LONG_THRESHOLD
+    short_thr = PROB_SHORT_THRESHOLD
     thr_desc = f"多≥{long_thr:.0%} / 空≤{short_thr:.0%}"
 
     if not ok:
@@ -232,16 +371,16 @@ def main_cycle(inst):
             resp = close_position(inst)
             log.info(f"🔄 平仓 {inst} | 盈亏: {pnl:.2f}")
             struct_log.bot_close(pair=inst, reason="reverse_to_long",
-                                 units=int(abs(pos["units"])), exit_price=close,
+                                 units=_fmt_units(abs(pos["units"])), exit_price=close,
                                  pnl=pnl, trade_id=_extract_close_trade_id(resp))
             result["close"] += 1
         if pos["units"] <= 0:
-            sl = close - 1.5 * atr
-            tp = close + 1.8 * abs(close - sl)
-            resp = place_market_order(inst, LOT_SIZE, sl, tp)
+            sl = close - _atr_sl_mult_for(inst) * atr
+            tp = close + _atr_tp_mult_for(inst) * abs(close - sl)
+            resp = place_market_order(inst, units, sl, tp)
             log.info(f"📈 LONG {inst} p={prob:.2f} SL={sl:.5f} TP={tp:.5f}")
             log.info(f"📈 开多仓 {inst} | 概率: {prob:.1%} | 入场价: {close:.4f}")
-            struct_log.bot_open(pair=inst, direction="LONG", units=LOT_SIZE, entry_price=close,
+            struct_log.bot_open(pair=inst, direction="LONG", units=units, entry_price=close,
                                 trade_id=_extract_open_trade_id(resp), sl=sl, tp=tp,
                                 score_final=prob)
             result["open"] += 1
@@ -256,16 +395,16 @@ def main_cycle(inst):
             resp = close_position(inst)
             log.info(f"🔄 平仓 {inst} | 盈亏: {pnl:.2f}")
             struct_log.bot_close(pair=inst, reason="reverse_to_short",
-                                 units=int(abs(pos["units"])), exit_price=close,
+                                 units=_fmt_units(abs(pos["units"])), exit_price=close,
                                  pnl=pnl, trade_id=_extract_close_trade_id(resp))
             result["close"] += 1
         if pos["units"] >= 0:
-            sl = close + 1.5 * atr
-            tp = close - 1.8 * abs(sl - close)
-            resp = place_market_order(inst, -LOT_SIZE, sl, tp)
+            sl = close + _atr_sl_mult_for(inst) * atr
+            tp = close - _atr_tp_mult_for(inst) * abs(sl - close)
+            resp = place_market_order(inst, -units, sl, tp)
             log.info(f"📉 SHORT {inst} p={prob:.2f} SL={sl:.5f} TP={tp:.5f}")
             log.info(f"📉 开空仓 {inst} | 概率: {prob:.1%} | 入场价: {close:.4f}")
-            struct_log.bot_open(pair=inst, direction="SHORT", units=-LOT_SIZE, entry_price=close,
+            struct_log.bot_open(pair=inst, direction="SHORT", units=-units, entry_price=close,
                                 trade_id=_extract_open_trade_id(resp), sl=sl, tp=tp,
                                 score_final=prob)
             result["open"] += 1
@@ -295,14 +434,39 @@ if __name__ == "__main__":
         sys.exit(1)
     log.info(f"账号: {OANDA_ENV.upper()} #{ARGS.account} → {OANDA_ACCOUNT_ID}")
     log.info(f"下单手数: {LOT_SIZE} units")
+    if TRADE_MODE == "crypto":
+        log.info(
+            "ATR 倍数: SL=%s(加密) | TP=%s(加密)", CRYPTO_SL_MULT, CRYPTO_TP_MULT
+        )
+    else:
+        log.info(
+            "ATR 倍数: SL=%s | TP=%s", ATR_SL_MULTIPLIER, ATR_TP_MULTIPLIER
+        )
+        if TRADE_MODE == "forex-crypto":
+            log.info("加密 ATR 倍数: SL=%s | TP=%s", CRYPTO_SL_MULT, CRYPTO_TP_MULT)
+    log.info("信号阈值: LONG=%s | SHORT=%s", PROB_LONG_THRESHOLD, PROB_SHORT_THRESHOLD)
     if DRY_RUN:
         log.warning("🧪 DRY-RUN 模式: 正常运行但不会真正下单/平仓/改单")
 
-    all_inst = CFG["instruments"]
+    # 品种选择：由 TRADE_MODE 决定（CLI --forex/-f | --crypto/-c | --forex-crypto/-b > run.env TRADE_MODE > forex）
+    forex_inst = CFG["instruments"]
+    crypto_inst = CFG.get("crypto_instruments", [])
+    if TRADE_MODE == "crypto":
+        active = list(crypto_inst)
+    elif TRADE_MODE == "forex-crypto":
+        active = list(forex_inst) + [i for i in crypto_inst if i not in forex_inst]
+    else:
+        active = list(forex_inst)
+    log.info(f"交易模式: {TRADE_MODE}")
+    log.info(f"待交易品种: {', '.join(active) or '无'}")
+    if TRADE_MODE != "forex":
+        log.info(f"加密手数: {CRYPTO_LOT_SIZE} | 波动率阈值: {CRYPTO_VOL_THRESHOLD}")
+
+    all_inst = active
     ready, missing = check_models(all_inst)
     if missing:
-        log.warning(f"⚠️ 缺少 {len(missing)}/{len(all_inst)} 个货币对的模型，先自动训练: {', '.join(missing)}")
-        log.warning(f"   将串行训练 {len(missing)} 个对，耗时较长，请耐心等待（Ctrl-C 可中断，已完成的模型会保留）...")
+        log.warning(f"⚠️ 缺少 {len(missing)}/{len(all_inst)} 个品种的模型，先自动训练: {', '.join(missing)}")
+        log.warning(f"   将串行训练 {len(missing)} 个品种，耗时较长，请耐心等待（Ctrl-C 可中断，已完成的模型会保留）...")
         for i, inst in enumerate(missing, 1):
             try:
                 log.info(f"🏋️ 训练 {inst} ... ({i}/{len(missing)})")

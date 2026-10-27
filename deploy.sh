@@ -58,9 +58,9 @@ use_python() {
 train_all() {
     use_python
     local pairs total i
-    pairs=$("$PY_BIN" -c "from config.pairs import get_instruments; print(' '.join(get_instruments()))")
+    pairs=$("$PY_BIN" -c "from config.pairs import get_all_instruments; print(' '.join(get_all_instruments()))")
     total=$(echo "$pairs" | wc -w)
-    log_info "开始训练 $total 个货币对（串行执行，耗时较长；Ctrl-C 可中断，已完成的模型会保留）"
+    log_info "开始训练 $total 个品种（外汇+加密，串行执行，耗时较长；Ctrl-C 可中断，已完成的模型会保留）"
     i=0
     for inst in $pairs; do
         i=$((i+1))
@@ -154,7 +154,7 @@ show_menu() {
     echo "Usage:"
     echo "  ./deploy.sh init         → Full setup"
     echo "  ./deploy.sh deps         → Reinstall deps"
-    echo "  ./deploy.sh train        → Train all (foreground)"
+    echo "  ./deploy.sh train        → Train all forex + crypto (foreground)"
     echo "  ./deploy.sh start        → Foreground bot run"
     echo "  ./deploy.sh daemon       → Start both: bot + weekly trainer"
     echo "  ./deploy.sh stop         → Stop both"
@@ -164,7 +164,12 @@ show_menu() {
     echo ""
     echo "  start/daemon/restart 可透传主循环参数，例如:"
     echo "    ./deploy.sh daemon --live -a 2 --lots 1"
-    echo "    (--live 实盘 | --account/-a N 账号序号 | --lots N 手数 units)"
+    echo "    ./deploy.sh daemon --live -a 2 --forex           # 只交易外汇（默认）"
+    echo "    ./deploy.sh daemon --live -a 2 --crypto          # 只交易加密"
+    echo "    ./deploy.sh daemon --live -a 2 --forex-crypto    # 外汇+加密"
+    echo "    ./deploy.sh daemon --live -a 2 -c --crypto-lots 0.01  # 仅加密并覆盖手数"
+    echo "    (-f/--forex 仅外汇 | -c/--crypto 仅加密 | -b/--forex-crypto 两者 |"
+    echo "     --crypto-lots N 加密手数 | 未指定时以 run.env 的 TRADE_MODE 为准)"
 }
 
 case "${1:-init}" in

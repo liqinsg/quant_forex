@@ -55,7 +55,13 @@ reports/
 | `--live` | 切换到 live 实盘账号（无简写）；**不带则一律 demo** |
 | `--account N` / `-a N` | 选择账号序号 N（1-based）：`--live` 对应 live 账号，否则对应 demo 账号 |
 | `--lots N` | 下单手数 N（以 unit 计，非合约金额）；缺省读 `config/run.env` 的 `DEMO_LOT_SIZE`/`LIVE_LOT_SIZE`（demo 10000 / live 1） |
+| `--forex` / `-f` | **只**交易外汇（默认） |
+| `--crypto` / `-c` | **只**交易加密货币（`BTC_USD`/`ETH_USD`） |
+| `--forex-crypto` / `-b` | 外汇与加密**同时**交易 |
+| `--crypto-lots N` | 加密下单手数 N（unit 计，支持小数）；缺省读 `config/run.env` 的 `DEMO_LOT_SIZE_CRYPTO`/`LIVE_LOT_SIZE_CRYPTO`（demo 1 / live 0.01） |
 | `--dry-run` | 空跑模式：正常跑完整流程（拉K线→特征→预测→风控），但**不下单/平仓/改单**（不向 OANDA 发送任何订单） |
+
+交易品种模式优先级：CLI（`-f`/`-c`/`-b`，三者互斥）> `run.env` 的 `TRADE_MODE` > 代码默认 `forex`。
 
 市场停牌（HALT）：主循环每轮会实时查询 OANDA 报价的 `tradeable` 状态；当市场停牌/休市
 （周末、假期、HALT）时，该货币对当轮跳过并打 tag=`market_halt`，动作限制与 `--dry-run` 一致。
@@ -64,9 +70,25 @@ reports/
 python main_loop_v2.py                        # demo 账号 1，手数取 DEMO_LOT_SIZE
 python main_loop_v2.py -a 5                   # demo 账号 5
 python main_loop_v2.py --live -a 2 --lots 1   # 实盘账号 2，手数 1
+python main_loop_v2.py --crypto               # 只交易加密（BTC_USD/ETH_USD）
+python main_loop_v2.py --forex-crypto         # 外汇 + 加密
+python main_loop_v2.py -c --crypto-lots 0.01  # 只交易加密，手数覆盖为 0.01
 python main_loop_v2.py --dry-run              # 空跑（不下单/平仓）
 ./deploy.sh daemon --live -a 2                # 后台实盘账号 2
 ```
+
+## 加密货币 (BTC_USD / ETH_USD)
+
+加密品种在 `config/forex_pairs.yml` 的 `crypto:` 段统一管理（当前启用 `BTC_USD`、`ETH_USD`；
+`LTC_USD`/`BCH_USD` 暂注释、不参与）。与外汇的区别通过独立配置隔离：
+
+- **启用方式**：`--forex/-f`（默认）、`--crypto/-c`、`--forex-crypto/-b` 三选一；未指定时以 `run.env` 的 `TRADE_MODE` 为准，均无则默认 `forex`。
+- **手数**：按 unit 计且支持小数，优先级 `--crypto-lots` > `run.env` 的 `DEMO_LOT_SIZE_CRYPTO`/`LIVE_LOT_SIZE_CRYPTO` > 缺省（demo 1 / live 0.01）。
+  OANDA 最小可交易单位：BTC 0.001、ETH 0.01。
+- **价格精度**：下单 SL/TP 精度改为**实时查询** OANDA 品种 `displayPrecision` 并缓存（BTC=1、ETH=2、日元=3、其余=5），
+  避免 `TAKE_PROFIT_ON_FILL_PRICE_PRECISION_EXCEEDED`。
+- **风控波动率**：加密使用 `config/config.yaml` 的 `crypto.vol_threshold_annual`（默认 1.0），外汇仍用 `risk.vol_threshold_annual`（0.15）。
+- **训练标签**：加密使用 `crypto.label_threshold_pct`（默认 0.01），外汇沿用 `make_label` 默认 0.002。
 
 - live / demo 使用**各自独立**的 TOKEN（`OANDA_API_TOKEN_LIVE` / `OANDA_API_TOKEN`），
   由 `--live` 决定，不会错用。
@@ -106,9 +128,9 @@ python main_loop_v2.py --dry-run              # 空跑（不下单/平仓）
 
 ## 首次启动
 
-- 当前 `config/forex_pairs.yml` 共 **29 对**；若本地只有 **27 套**完整模型（`CAD_NZD`、`CHF_NZD` 缺失），
-  首次启动会**自动补训**缺失的货币对，训练完成后才进入交易循环，无需手动干预
-- **周守护**（`weekly_train_daemon.py`）默认每 **7 天**（`lgb.retrain_interval_days`）对全部货币对执行一次全量增量更新
+- 当前 `config/forex_pairs.yml` 启用 **8 对外汇** + **2 对加密**（`BTC_USD`、`ETH_USD`，其余注释未启用）；若本地模型缺失，
+  首次启动会**自动补训**缺失的品种，训练完成后才进入交易循环，无需手动干预
+- **周守护**（`weekly_train_daemon.py`）默认每 **7 天**（`lgb.retrain_interval_days`）对外汇 + 加密全部品种执行一次全量增量更新
 - 日志位置：
   - `reports/bot.log` — 主交易日志（进程前台输出另见 `reports/bot_console.out`）
   - `reports/weekly_train.log` — 周度训练日志（进程前台输出另见 `reports/weekly_console.out`）
