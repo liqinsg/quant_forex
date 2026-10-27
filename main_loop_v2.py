@@ -8,11 +8,13 @@ PROJECT_ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
 import time
-import logging
+import warnings
 import pandas as pd
 from datetime import datetime
 from config.config_oanda import get_oanda_profile, is_market_open
 from config import load_config, model_dir, current_env, LAST_RETRAIN_FILE
+from utils.logging_utils import get_logger
+from utils.structured_logger import StructuredLogger
 
 profile = get_oanda_profile()
 OANDA_ACCOUNT_ID = profile["account_ids"][0]
@@ -20,15 +22,9 @@ OANDA_TOKEN = profile["token"]
 OANDA_ENV = profile["env"]
 api = profile["oanda_client"]
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s | %(levelname)s | %(message)s",
-    handlers=[
-        logging.FileHandler(PROJECT_ROOT / "reports" / "bot.log"),
-        logging.StreamHandler()
-    ]
-)
-log = logging.getLogger("bot")
+# 中心化日志：主循环用统一 logger，结构化日志记录主动(BOT)操作
+log = get_logger("main_loop")
+struct_log = StructuredLogger("practice")
 
 # 读配置 — 统一入口（含 forex_pairs.yml 的货币对）
 CFG = load_config()
@@ -40,6 +36,16 @@ from models.train_lgb_signal import load_model, run_full_training
 from execution.oanda_conn import place_market_order, close_position, get_open_position
 from execution.risk_gate import enhanced_risk_check, circuit
 from arch import arch_model
+from arch.utility.exceptions import (
+    ConvergenceWarning,
+    StartingValueWarning,
+    InitialValueWarning,
+    DataScaleWarning,
+)
+
+# 屏蔽 GARCH(arch) 拟合的收敛/初始值/量纲类警告，避免刷屏
+for _garch_warn in (ConvergenceWarning, StartingValueWarning, InitialValueWarning, DataScaleWarning):
+    warnings.filterwarnings("ignore", category=_garch_warn)
 
 BALANCE = 5000.0
 MODEL_DIR = model_dir()
@@ -77,13 +83,35 @@ def calc_garch_vol(returns):
     fc = res.forecast(horizon=1)
     return float(fc.variance.iloc[-1, 0]**0.5 / 100 * (252**0.5))
 
+def _extract_open_trade_id(resp):
+    """从 OANDA 下单响应中提取刚开仓的 tradeID；缺失返回空串。"""
+    try:
+        return resp["orderFillTransaction"]["tradeOpened"]["tradeID"]
+    except (KeyError, TypeError):
+        return ""
+
+def _extract_close_trade_id(resp):
+    """从 OANDA 平仓响应中提取被平仓的 tradeID；缺失返回空串。"""
+    try:
+        for key in ("longOrderFillTransaction", "shortOrderFillTransaction"):
+            closed = resp.get(key, {}).get("tradesClosed", [])
+            if closed:
+                return closed[0]["tradeID"]
+    except (AttributeError, TypeError):
+        pass
+    return ""
+
 def main_cycle(inst):
+    """处理单个品种。返回本轮计数 {"open": int, "close": int, "observe": int, "fail": int}。"""
+    result = {"open": 0, "close": 0, "observe": 0, "fail": 0}
+
     df = update_csv(inst)
     df = add_ta_features(df)
     latest = df.dropna().iloc[-1:]
     if len(latest) == 0:
         log.warning(f"{inst}: 无有效数据")
-        return
+        result["fail"] += 1
+        return result
 
     pkg = load_model(inst)
     feats = pkg["feature_cols"]
@@ -99,32 +127,85 @@ def main_cycle(inst):
         pass
 
     if not all(c in latest.columns for c in feats):
-        log.warning(f"{inst}: 特征不匹配，跳过"); return
+        log.warning(f"{inst}: 特征不匹配，跳过")
+        result["fail"] += 1
+        return result
 
     prob = float(pkg["model"].predict(latest[feats])[0])
     ann_vol = calc_garch_vol(df["ta_return_1"].dropna())
     pos = get_open_position(inst)
     ok, reason = enhanced_risk_check(ann_vol, 0.05, 0.0, 0, CFG)
+
+    long_thr = CFG["signal"]["prob_long_threshold"]
+    short_thr = CFG["signal"]["prob_short_threshold"]
+    thr_desc = f"多≥{long_thr:.0%} / 空≤{short_thr:.0%}"
+
     if not ok:
-        log.info(f"{inst}: {reason}"); return
+        log.info(f"{inst}: {reason}")
+        log.info(f"⏸️ 观望 {inst} | 概率: {prob:.1%} | 阈值: {thr_desc} | 原因: 风控限制")
+        struct_log.skip_signal(inst, "risk_limit", detail=reason, prob=prob,
+                               prob_long_threshold=long_thr, prob_short_threshold=short_thr)
+        result["observe"] += 1
+        return result
 
     atr = float(latest["ta_atr"].iloc[0])
     close = float(latest["close"].iloc[0])
 
-    if prob > CFG["signal"]["prob_long_threshold"]:
-        if pos["units"] < 0: close_position(inst)
+    if prob > long_thr:
+        if pos["units"] < 0:
+            pnl = float(pos["unrealizedPL"])
+            resp = close_position(inst)
+            log.info(f"🔄 平仓 {inst} | 盈亏: {pnl:.2f}")
+            struct_log.bot_close(pair=inst, reason="reverse_to_long",
+                                 units=int(abs(pos["units"])), exit_price=close,
+                                 pnl=pnl, trade_id=_extract_close_trade_id(resp))
+            result["close"] += 1
         if pos["units"] <= 0:
             sl = close - 1.5 * atr
             tp = close + 1.8 * abs(close - sl)
-            place_market_order(inst, 1000, sl, tp)
+            resp = place_market_order(inst, 1000, sl, tp)
             log.info(f"📈 LONG {inst} p={prob:.2f} SL={sl:.5f} TP={tp:.5f}")
-    elif prob < CFG["signal"]["prob_short_threshold"]:
-        if pos["units"] > 0: close_position(inst)
+            log.info(f"📈 开多仓 {inst} | 概率: {prob:.1%} | 入场价: {close:.4f}")
+            struct_log.bot_open(pair=inst, direction="LONG", units=1000, entry_price=close,
+                                trade_id=_extract_open_trade_id(resp), sl=sl, tp=tp,
+                                score_final=prob)
+            result["open"] += 1
+        else:
+            log.info(f"⏸️ 观望 {inst} | 概率: {prob:.1%} | 阈值: {thr_desc} | 原因: 已有持仓")
+            struct_log.skip_signal(inst, "has_position", prob=prob,
+                                   prob_long_threshold=long_thr, prob_short_threshold=short_thr)
+            result["observe"] += 1
+    elif prob < short_thr:
+        if pos["units"] > 0:
+            pnl = float(pos["unrealizedPL"])
+            resp = close_position(inst)
+            log.info(f"🔄 平仓 {inst} | 盈亏: {pnl:.2f}")
+            struct_log.bot_close(pair=inst, reason="reverse_to_short",
+                                 units=int(abs(pos["units"])), exit_price=close,
+                                 pnl=pnl, trade_id=_extract_close_trade_id(resp))
+            result["close"] += 1
         if pos["units"] >= 0:
             sl = close + 1.5 * atr
             tp = close - 1.8 * abs(sl - close)
-            place_market_order(inst, -1000, sl, tp)
+            resp = place_market_order(inst, -1000, sl, tp)
             log.info(f"📉 SHORT {inst} p={prob:.2f} SL={sl:.5f} TP={tp:.5f}")
+            log.info(f"📉 开空仓 {inst} | 概率: {prob:.1%} | 入场价: {close:.4f}")
+            struct_log.bot_open(pair=inst, direction="SHORT", units=-1000, entry_price=close,
+                                trade_id=_extract_open_trade_id(resp), sl=sl, tp=tp,
+                                score_final=prob)
+            result["open"] += 1
+        else:
+            log.info(f"⏸️ 观望 {inst} | 概率: {prob:.1%} | 阈值: {thr_desc} | 原因: 已有持仓")
+            struct_log.skip_signal(inst, "has_position", prob=prob,
+                                   prob_long_threshold=long_thr, prob_short_threshold=short_thr)
+            result["observe"] += 1
+    else:
+        log.info(f"⏸️ 观望 {inst} | 概率: {prob:.1%} | 阈值: {thr_desc} | 原因: 概率区间正常")
+        struct_log.skip_signal(inst, "no_signal", prob=prob,
+                               prob_long_threshold=long_thr, prob_short_threshold=short_thr)
+        result["observe"] += 1
+
+    return result
 
 if __name__ == "__main__":
     log.info("🚀 Bot v6.8x STARTED")
@@ -150,9 +231,15 @@ if __name__ == "__main__":
     check_weekly_status()
 
     while True:
+        log.info(f"📊 本轮处理开始: {datetime.now():%Y-%m-%d %H:%M:%S} | 待处理: {len(ready)} 个品种")
+        totals = {"open": 0, "close": 0, "observe": 0, "fail": 0}
         for inst in ready:
             try:
-                main_cycle(inst)
+                r = main_cycle(inst)
+                for k in totals:
+                    totals[k] += r.get(k, 0)
             except Exception as e:
                 log.error(f"❌ {inst}: {e}")
+                totals["fail"] += 1
+        log.info(f"✅ 本轮完成: 开仓 {totals['open']} | 平仓 {totals['close']} | 观望 {totals['observe']} | 失败 {totals['fail']}")
         time.sleep(3600)

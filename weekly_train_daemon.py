@@ -17,7 +17,6 @@
 """
 import sys
 import time
-import logging
 from pathlib import Path
 from datetime import datetime
 
@@ -32,18 +31,12 @@ from config import (
     LAST_RETRAIN_FILE,
 )
 from models.train_lgb_signal import run_full_training
+from utils.logging_utils import get_logger
 
 REPORTS_DIR.mkdir(parents=True, exist_ok=True)
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s | %(levelname)s | %(message)s",
-    handlers=[
-        logging.FileHandler(REPORTS_DIR / "weekly_train.log"),
-        logging.StreamHandler(),
-    ],
-)
-log = logging.getLogger("weekly_train")
+# 中心化日志
+log = get_logger("weekly_train")
 
 CFG = load_config()
 INTERVAL_DAYS = CFG["lgb"]["retrain_interval_days"]

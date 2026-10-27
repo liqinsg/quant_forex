@@ -32,7 +32,6 @@ MANIFEST
 *.manifest
 *.spec
 
-# Installer logs
 pip-log.txt
 pip-delete-this-directory.txt
 
@@ -217,3 +216,6 @@ __marimo__/
 # Streamlit
 .streamlit/secrets.toml
 reports/*
+!reports/.gitkeep
+logs/*
+!logs/.gitkeep
