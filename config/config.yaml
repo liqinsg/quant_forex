@@ -18,6 +18,12 @@ risk:
   vol_threshold_annual: 0.15
   stop_loss_atr_multiplier: 1.5
   take_profit_atr_multiplier: 1.8
+  # 分组控仓：override_max_open=1 时按分组独立控仓（每组每轮只开信号最强的 1 个）；
+  # =0 时回退全局 max_open。max_open=0 表示不限，保持旧行为。
+  max_open_per_group_forex: 6
+  max_open_per_group_crypto: 2
+  override_max_open: 1
+  max_open: 0
 
 signal:
   prob_long_threshold: 0.65 # long概率阈值 ，超过该概率则下单 # 0.65

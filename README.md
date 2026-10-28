@@ -18,7 +18,7 @@ AI-powered automated trading bot for OANDA — LightGBM + TCN + GARCH + Drift Mo
 |---|---|
 | `./deploy.sh init` | 完整安装（依赖 + 目录 + .env 模板） |
 | `./deploy.sh deps` | 重装 Python 依赖 |
-| `./deploy.sh train` | 前台训练**全部品种**（8 外汇 + 2 加密，读 `config/forex_pairs.yml`）；耗时较长，Ctrl-C 可中断，已完成的模型保留 |
+| `./deploy.sh train` | 前台训练**全部品种**（8 外汇 + 4 加密，读 `config/instruments.yaml`）；耗时较长，Ctrl-C 可中断，已完成的模型保留 |
 | `./deploy.sh start` | 前台运行主循环 |
 | `./deploy.sh daemon` | 后台同时启动：**主循环 + 周守护** |
 | `./deploy.sh stop` | 同时停止两个进程 |
@@ -56,7 +56,7 @@ reports/
 | `--account N` / `-a N` | 选择账号序号 N（1-based）：`--live` 对应 live 账号，否则对应 demo 账号 |
 | `--lots N` | 下单手数 N（以 unit 计，非合约金额）；缺省读 `config/run.env` 的 `DEMO_LOT_SIZE`/`LIVE_LOT_SIZE`（demo 10000 / live 1） |
 | `--forex` / `-f` | **只**交易外汇（默认） |
-| `--crypto` / `-c` | **只**交易加密货币（`BTC_USD`/`ETH_USD`） |
+| `--crypto` / `-c` | **只**交易加密货币（`BTC_USD`/`ETH_USD`/`LTC_USD`/`BCH_USD`） |
 | `--forex-crypto` / `-b` | 外汇与加密**同时**交易 |
 | `--crypto-lots N` | 加密下单手数 N（unit 计，支持小数）；缺省读 `config/run.env` 的 `DEMO_LOT_SIZE_CRYPTO`/`LIVE_LOT_SIZE_CRYPTO`（demo 1 / live 0.01） |
 | `--dry-run` | 空跑模式：正常跑完整流程（拉K线→特征→预测→风控），但**不下单/平仓/改单**（不向 OANDA 发送任何订单） |
@@ -70,7 +70,7 @@ reports/
 python main_loop_v2.py                        # demo 账号 1，手数取 DEMO_LOT_SIZE
 python main_loop_v2.py -a 5                   # demo 账号 5
 python main_loop_v2.py --live -a 2 --lots 1   # 实盘账号 2，手数 1
-python main_loop_v2.py --crypto               # 只交易加密（BTC_USD/ETH_USD）
+python main_loop_v2.py --crypto               # 只交易加密（BTC_USD/ETH_USD/LTC_USD/BCH_USD）
 python main_loop_v2.py --forex-crypto         # 外汇 + 加密
 python main_loop_v2.py -c --crypto-lots 0.01  # 只交易加密，手数覆盖为 0.01
 python main_loop_v2.py --dry-run              # 空跑（不下单/平仓）
@@ -95,16 +95,18 @@ python main_loop_v2.py --dry-run              # 空跑（不下单/平仓）
 
 - **换模式必须走 `restart`**：主循环已在运行时，`daemon` 检测到 PID 存活会**直接跳过**（仅打印 warning），新参数不生效。
 - **`daemon` / `restart` 会连带拉起周守护**（`weekly_train_daemon.py`），它与 `TRADE_MODE` **无关**，
-  始终按 `config/forex_pairs.yml` 对**外汇 + 加密**全部品种做增量更新（因此 `daemon -c` ≠ 只碰加密）。
+  始终按 `config/instruments.yaml` 对**外汇 + 加密**全部品种做增量更新（因此 `daemon -c` ≠ 只碰加密）。
 - **长期固定模式**：改 `config/run.env` 的 `TRADE_MODE`（`forex` / `crypto` / `forex-crypto`）后 `./deploy.sh restart`，
   之后裸跑 `./deploy.sh daemon` 即生效；CLI 参数始终可临时覆盖。
 - 实时看日志：`tail -f reports/bot_console.out`（主循环）/ `reports/weekly_console.out`（周守护）。
 - 不要用 `nohup python main_loop_v2.py ... &` 手动拉起：不会写 `reports/bot.pid`，`./deploy.sh status/stop` 将无法管理。
 
-## 加密货币 (BTC_USD / ETH_USD)
+## 加密货币 (BTC_USD / ETH_USD / LTC_USD / BCH_USD)
 
-加密品种在 `config/forex_pairs.yml` 的 `crypto:` 段统一管理（当前启用 `BTC_USD`、`ETH_USD`；
-`LTC_USD`/`BCH_USD` 暂注释、不参与）。与外汇的区别通过独立配置隔离：
+加密品种在 `config/instruments.yaml` 的 `crypto:` 段统一管理（当前启用 `BTC_USD`、`ETH_USD`、`LTC_USD`、`BCH_USD`）。
+与外汇的区别通过独立配置隔离：
+
+> 备注：`LTC_USD` / `BCH_USD` 保证金较低，后续可能作为 live 账号的**专注品种**（视流动性与模型表现再定）。
 
 - **启用方式**：`--forex/-f`（默认）、`--crypto/-c`、`--forex-crypto/-b` 三选一；未指定时以 `run.env` 的 `TRADE_MODE` 为准，均无则默认 `forex`。
 - **手数**：按 unit 计且支持小数，优先级 `--crypto-lots` > `run.env` 的 `DEMO_LOT_SIZE_CRYPTO`/`LIVE_LOT_SIZE_CRYPTO` > 缺省（demo 1 / live 0.01）。
@@ -160,7 +162,7 @@ python main_loop_v2.py --dry-run              # 空跑（不下单/平仓）
 
 ## 首次启动
 
-- 当前 `config/forex_pairs.yml` 启用 **8 对外汇** + **2 对加密**（`BTC_USD`、`ETH_USD`，其余注释未启用）；若本地模型缺失，
+- 当前 `config/instruments.yaml` 启用 **8 对外汇** + **4 对加密**（`BTC_USD`、`ETH_USD`、`LTC_USD`、`BCH_USD`）；若本地模型缺失，
   首次启动会**自动补训**缺失的品种，训练完成后才进入交易循环，无需手动干预
 - **周守护**（`weekly_train_daemon.py`）默认每 **7 天**（`lgb.retrain_interval_days`）对外汇 + 加密全部品种执行一次全量增量更新
 - **K 线 CSV 自愈**：`data/<env>/datasets/*.csv` 若为空或损坏（例如上次训练被中断写坏），

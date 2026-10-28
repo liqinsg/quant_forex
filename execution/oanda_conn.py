@@ -92,6 +92,26 @@ def get_open_position(instrument):
     except: return {"has_position":False, "units":0, "unrealizedPL":0.0}
 
 
+def open_bot_instruments():
+    """返回当前 bot（tag=fx_bot_v7*）已开 open trades 的品种列表，按 trade 计数。
+
+    用于分组控仓统计；查询失败返回 None，调用方据此跳过本轮开仓（fail-closed）。
+    """
+    try:
+        resp = get_client().request(trades.OpenTrades(_account_id()))
+    except Exception:
+        return None
+    instruments = []
+    for trade in resp.get("trades", []):
+        tag = (trade.get("clientExtensions") or {}).get("tag") or ""
+        if not tag.startswith(_BOT_TRADE_TAG):
+            continue
+        if float(trade.get("currentUnits", 0) or 0) == 0:
+            continue
+        instruments.append(trade.get("instrument"))
+    return instruments
+
+
 def has_open_bot_trade(instrument, units):
     """检查是否已存在当前 bot 打开的同品种同方向 open trade。"""
     direction_sign = 1 if float(units) > 0 else -1

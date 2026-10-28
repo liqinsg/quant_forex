@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
-"""周度增量训练守护 — 独立轻量进程，只更新模型，不涉及下单。
+"""
+weekly_train_daemon.py
 
+周度增量训练守护 — 独立轻量进程，只更新模型，不涉及下单。
 职责：
     1. 读取 config.yaml 的 lgb.retrain_interval_days（默认 7 天）。
     2. 首次启动：仅补训缺失的模型（已存在则跳过）。

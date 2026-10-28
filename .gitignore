@@ -219,3 +219,29 @@ reports/*
 !reports/.gitkeep
 logs/*
 !logs/.gitkeep
+# Models
+models/*
+!models/.gitkeep
+# Dataset files
+data/live/datasets/*
+!data/live/datasets/.gitkeep
+
+data/practice/datasets/*
+!data/practice/datasets/.gitkeep
+
+# Model files
+# models/model_store/live/*
+# !models/model_store/live/.gitkeep
+
+# models/model_store/practice/*
+# !models/model_store/practice/.gitkeep
+
+# Secrets
+#config/run.env
+
+# Keep models directory structure, ignore generated model files
+models/model_store/live/*
+!models/model_store/live/.gitkeep
+
+models/model_store/practice/*
+!models/model_store/practice/.gitkeep

@@ -177,7 +177,7 @@ CRYPTO_LOT_SIZE = _resolve_crypto_lots(ARGS.crypto_lots, OANDA_ENV)
 TRADE_MODE = _resolve_trade_mode(ARGS.trade_mode)
 DRY_RUN = ARGS.dry_run
 
-# 读配置 — 统一入口（含 forex_pairs.yml 的货币对）
+# 读配置 — 统一入口（含 instruments.yaml 的货币对）
 CFG = load_config()
 PROB_LONG_THRESHOLD = _resolve_float(
     "PROB_LONG_THRESHOLD", "signal.prob_long_threshold", 0.65
@@ -209,6 +209,16 @@ CRYPTO_TP_MULT = _resolve_float(
 CRYPTO_VOL_THRESHOLD = _resolve_float(
     "CRYPTO_VOL_THRESHOLD", "crypto.vol_threshold_annual", 1.0
 )
+# 分组控仓：OVERRIDE_MAX_OPEN=1 按分组独立控仓；=0 沿用全局 MAX_OPEN（默认 0=不限）
+OVERRIDE_MAX_OPEN = _resolve_float("OVERRIDE_MAX_OPEN", "risk.override_max_open", 0)
+MAX_OPEN_PER_GROUP_FOREX = int(
+    _resolve_float("MAX_OPEN_PER_GROUP_FOREX", "risk.max_open_per_group_forex", 6)
+)
+MAX_OPEN_PER_GROUP_CRYPTO = int(
+    _resolve_float("MAX_OPEN_PER_GROUP_CRYPTO", "risk.max_open_per_group_crypto", 2)
+)
+# 全局上限（仅 OVERRIDE_MAX_OPEN=0 时生效；0 表示不限，保持旧行为）
+MAX_OPEN = int(_resolve_float("MAX_OPEN", "risk.max_open", 0))
 
 # 导入：从 forex_oanda 包加载
 from data.fetch_oanda import update_csv
@@ -219,6 +229,7 @@ from execution.oanda_conn import (
     close_position,
     get_open_position,
     has_open_bot_trade,
+    open_bot_instruments,
     set_dry_run,
 )
 from execution.risk_gate import enhanced_risk_check, circuit
@@ -270,6 +281,23 @@ def _prob_long_thr_for(inst):
 def _prob_short_thr_for(inst):
     """做空概率阈值：加密用独立阈值，外汇用 PROB_SHORT_THRESHOLD。"""
     return CRYPTO_PROB_SHORT_THRESHOLD if is_crypto(inst) else PROB_SHORT_THRESHOLD
+
+
+def _group_for(inst):
+    """返回品种所属分组：'crypto' 或 'forex'。"""
+    return "crypto" if is_crypto(inst) else "forex"
+
+
+def _group_max_open(group):
+    """分组开仓上限；OVERRIDE_MAX_OPEN=0 时回退全局 MAX_OPEN（0=不限）。"""
+    if OVERRIDE_MAX_OPEN:
+        return MAX_OPEN_PER_GROUP_CRYPTO if group == "crypto" else MAX_OPEN_PER_GROUP_FOREX
+    return MAX_OPEN
+
+
+def _count_open_in_group(positions, group):
+    """统计当前 bot 持仓中属于指定分组的数量（positions 为品种列表）。"""
+    return sum(1 for inst in positions if _group_for(inst) == group)
 
 
 def _fmt_units(units):
@@ -327,8 +355,15 @@ def _extract_close_trade_id(resp):
         pass
     return ""
 
-def main_cycle(inst):
-    """处理单个品种。返回本轮计数 {"open": int, "close": int, "observe": int, "fail": int}。"""
+def analyze_cycle(inst):
+    """分析单个品种：处理停牌/风控/平仓/反手，并返回潜在开仓候选。
+
+    开仓动作被推迟到分组控仓阶段统一执行，故本函数不直接下单。
+    返回 (result, candidate)：
+      result    = {"open","close","observe","fail"}（"open" 恒为 0）
+      candidate = None 或 {"inst","group","direction","prob","signal_strength",
+                           "units","sl","tp","close","thr_desc","long_thr","short_thr"}
+    """
     result = {"open": 0, "close": 0, "observe": 0, "fail": 0}
     units = _units_for(inst)
 
@@ -337,7 +372,7 @@ def main_cycle(inst):
         log.info(f"🛑 观望 {inst} | 市场停牌 (tag=market_halt)")
         struct_log.skip_signal(inst, "market_halt")
         result["observe"] += 1
-        return result
+        return result, None
 
     df = update_csv(inst)
     df = add_ta_features(df)
@@ -345,7 +380,7 @@ def main_cycle(inst):
     if len(latest) == 0:
         log.warning(f"{inst}: 无有效数据")
         result["fail"] += 1
-        return result
+        return result, None
 
     pkg = load_model(inst)
     feats = pkg["feature_cols"]
@@ -363,7 +398,7 @@ def main_cycle(inst):
     if not all(c in latest.columns for c in feats):
         log.warning(f"{inst}: 特征不匹配，跳过")
         result["fail"] += 1
-        return result
+        return result, None
 
     prob = float(pkg["model"].predict(latest[feats])[0])
     ann_vol = calc_garch_vol(df["ta_return_1"].dropna())
@@ -380,7 +415,7 @@ def main_cycle(inst):
         struct_log.skip_signal(inst, "risk_limit", detail=reason, prob=prob,
                                prob_long_threshold=long_thr, prob_short_threshold=short_thr)
         result["observe"] += 1
-        return result
+        return result, None
 
     atr = float(latest["ta_atr"].iloc[0])
     close = float(latest["close"].iloc[0])
@@ -408,21 +443,19 @@ def main_cycle(inst):
                     prob_short_threshold=short_thr,
                 )
                 result["observe"] += 1
-                return result
+                return result, None
             sl = close - _atr_sl_mult_for(inst) * atr
             tp = close + _atr_tp_mult_for(inst) * abs(close - sl)
-            resp = place_market_order(inst, units, sl, tp)
-            log.info(f"📈 LONG {inst} p={prob:.2f} SL={sl:.5f} TP={tp:.5f}")
-            log.info(f"📈 开多仓 {inst} | 概率: {prob:.1%} | 入场价: {close:.4f}")
-            struct_log.bot_open(pair=inst, direction="LONG", units=units, entry_price=close,
-                                trade_id=_extract_open_trade_id(resp), sl=sl, tp=tp,
-                                score_final=prob)
-            result["open"] += 1
-        else:
-            log.info(f"⏸️ 观望 {inst} | 概率: {prob:.1%} | 阈值: {thr_desc} | 原因: 已有持仓")
-            struct_log.skip_signal(inst, "has_position", prob=prob,
-                                   prob_long_threshold=long_thr, prob_short_threshold=short_thr)
-            result["observe"] += 1
+            return result, {
+                "inst": inst, "group": _group_for(inst), "direction": "LONG",
+                "prob": prob, "signal_strength": prob, "units": units,
+                "sl": sl, "tp": tp, "close": close, "thr_desc": thr_desc,
+                "long_thr": long_thr, "short_thr": short_thr,
+            }
+        log.info(f"⏸️ 观望 {inst} | 概率: {prob:.1%} | 阈值: {thr_desc} | 原因: 已有持仓")
+        struct_log.skip_signal(inst, "has_position", prob=prob,
+                               prob_long_threshold=long_thr, prob_short_threshold=short_thr)
+        result["observe"] += 1
     elif prob < short_thr:
         if pos["units"] > 0:
             pnl = float(pos["unrealizedPL"])
@@ -446,28 +479,104 @@ def main_cycle(inst):
                     prob_short_threshold=short_thr,
                 )
                 result["observe"] += 1
-                return result
+                return result, None
             sl = close + _atr_sl_mult_for(inst) * atr
             tp = close - _atr_tp_mult_for(inst) * abs(sl - close)
-            resp = place_market_order(inst, -units, sl, tp)
-            log.info(f"📉 SHORT {inst} p={prob:.2f} SL={sl:.5f} TP={tp:.5f}")
-            log.info(f"📉 开空仓 {inst} | 概率: {prob:.1%} | 入场价: {close:.4f}")
-            struct_log.bot_open(pair=inst, direction="SHORT", units=-units, entry_price=close,
-                                trade_id=_extract_open_trade_id(resp), sl=sl, tp=tp,
-                                score_final=prob)
-            result["open"] += 1
-        else:
-            log.info(f"⏸️ 观望 {inst} | 概率: {prob:.1%} | 阈值: {thr_desc} | 原因: 已有持仓")
-            struct_log.skip_signal(inst, "has_position", prob=prob,
-                                   prob_long_threshold=long_thr, prob_short_threshold=short_thr)
-            result["observe"] += 1
+            return result, {
+                "inst": inst, "group": _group_for(inst), "direction": "SHORT",
+                "prob": prob, "signal_strength": 1.0 - prob, "units": -units,
+                "sl": sl, "tp": tp, "close": close, "thr_desc": thr_desc,
+                "long_thr": long_thr, "short_thr": short_thr,
+            }
+        log.info(f"⏸️ 观望 {inst} | 概率: {prob:.1%} | 阈值: {thr_desc} | 原因: 已有持仓")
+        struct_log.skip_signal(inst, "has_position", prob=prob,
+                               prob_long_threshold=long_thr, prob_short_threshold=short_thr)
+        result["observe"] += 1
     else:
         log.info(f"⏸️ 观望 {inst} | 概率: {prob:.1%} | 阈值: {thr_desc} | 原因: 概率区间正常")
         struct_log.skip_signal(inst, "no_signal", prob=prob,
                                prob_long_threshold=long_thr, prob_short_threshold=short_thr)
         result["observe"] += 1
 
-    return result
+    return result, None
+
+
+def _place_candidate(cand):
+    """执行单个开仓候选的下单与日志记录。"""
+    inst, prob = cand["inst"], cand["prob"]
+    direction = cand["direction"]
+    resp = place_market_order(inst, cand["units"], cand["sl"], cand["tp"])
+    icon = "📈" if direction == "LONG" else "📉"
+    log.info(f"{icon} {direction} {inst} p={prob:.2f} SL={cand['sl']:.5f} TP={cand['tp']:.5f}")
+    log.info(f"{icon} 开{'多' if direction == 'LONG' else '空'}仓 {inst} | 概率: {prob:.1%} | 入场价: {cand['close']:.4f}")
+    struct_log.bot_open(pair=inst, direction=direction, units=cand["units"],
+                        entry_price=cand["close"], trade_id=_extract_open_trade_id(resp),
+                        sl=cand["sl"], tp=cand["tp"], score_final=prob)
+
+
+def run_cycle(ready):
+    """一轮完整处理：先分析（含平仓/反手），再按分组控仓选最优开仓。
+
+    返回本轮计数 {"open","close","observe","fail"}。
+    """
+    totals = {"open": 0, "close": 0, "observe": 0, "fail": 0}
+    candidates = []
+    for inst in ready:
+        try:
+            r, cand = analyze_cycle(inst)
+            for k in totals:
+                totals[k] += r.get(k, 0)
+            if cand:
+                candidates.append(cand)
+        except Exception as e:
+            log.error(f"❌ {inst}: {e}")
+            totals["fail"] += 1
+
+    if not candidates:
+        return totals
+
+    # 统计当前 bot 已开持仓（查询失败则本轮不开仓，fail-closed）
+    positions = open_bot_instruments()
+    if positions is None:
+        log.warning("⚠️ 无法读取当前持仓，本轮跳过所有开仓")
+        totals["observe"] += len(candidates)
+        return totals
+
+    # 分组控仓：每组只选信号最强（signal_strength 最大）的 1 个开仓
+    for grp in ("forex", "crypto"):
+        grp_candidates = [c for c in candidates if c["group"] == grp]
+        if not grp_candidates:
+            continue
+        open_now = _count_open_in_group(positions, grp)
+        grp_limit = _group_max_open(grp)
+        if grp_limit > 0 and open_now >= grp_limit:
+            log.info(f"📦 {grp} 组已达上限 {open_now}/{grp_limit}，跳过开仓")
+            for c in grp_candidates:
+                struct_log.skip_signal(c["inst"], "group_cap",
+                                       detail=f"{grp}:{open_now}/{grp_limit}",
+                                       prob=c["prob"],
+                                       prob_long_threshold=c["long_thr"],
+                                       prob_short_threshold=c["short_thr"])
+            totals["observe"] += len(grp_candidates)
+            continue
+
+        grp_candidates.sort(key=lambda x: x["signal_strength"], reverse=True)
+        best = grp_candidates[0]
+        log.info(f"✅ {grp} 组最优: {best['inst']} (信号分={best['signal_strength']:.4f}) → 开仓")
+        _place_candidate(best)
+        totals["open"] += 1
+        # 同组落选者计为观望
+        for c in grp_candidates[1:]:
+            struct_log.skip_signal(c["inst"], "not_selected",
+                                   detail=f"{grp}:lower_strength",
+                                   prob=c["prob"],
+                                   prob_long_threshold=c["long_thr"],
+                                   prob_short_threshold=c["short_thr"])
+        totals["observe"] += len(grp_candidates) - 1
+
+    return totals
+
+
 
 if __name__ == "__main__":
     log.info("🚀 Bot v6.8x STARTED")
@@ -511,6 +620,17 @@ if __name__ == "__main__":
                 CRYPTO_PROB_LONG_THRESHOLD,
                 CRYPTO_PROB_SHORT_THRESHOLD,
             )
+    if OVERRIDE_MAX_OPEN:
+        log.info(
+            "分组控仓: 外汇=%s | 加密=%s | 启用=True (每组每轮只开信号最强的 1 个)",
+            MAX_OPEN_PER_GROUP_FOREX,
+            MAX_OPEN_PER_GROUP_CRYPTO,
+        )
+    else:
+        log.info(
+            "分组控仓: 启用=False | 全局上限 MAX_OPEN=%s (0=不限)",
+            MAX_OPEN or "不限",
+        )
     if DRY_RUN:
         log.warning("🧪 DRY-RUN 模式: 正常运行但不会真正下单/平仓/改单")
 
@@ -549,14 +669,6 @@ if __name__ == "__main__":
 
     while True:
         log.info(f"📊 本轮处理开始: {datetime.now():%Y-%m-%d %H:%M:%S} | 待处理: {len(ready)} 个品种")
-        totals = {"open": 0, "close": 0, "observe": 0, "fail": 0}
-        for inst in ready:
-            try:
-                r = main_cycle(inst)
-                for k in totals:
-                    totals[k] += r.get(k, 0)
-            except Exception as e:
-                log.error(f"❌ {inst}: {e}")
-                totals["fail"] += 1
+        totals = run_cycle(ready)
         log.info(f"✅ 本轮完成: 开仓 {totals['open']} | 平仓 {totals['close']} | 观望 {totals['observe']} | 失败 {totals['fail']}")
         time.sleep(3600)

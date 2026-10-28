@@ -1,6 +1,6 @@
 """config 包 — 统一配置加载入口 + 数据/模型路径解析。
 
-load_config() 读取 config.yaml，并把 forex_pairs.yml 的货币对
+load_config() 读取 config.yaml，并把 instruments.yaml 的货币对
 注入 CFG["instruments"]，因此下游代码可继续用 CFG["instruments"]。
 
 路径按 OANDA 环境（practice / live）隔离：
@@ -21,7 +21,7 @@ LAST_RETRAIN_FILE = REPORTS_DIR / ".last_weekly_retrain"
 
 
 def load_config() -> dict:
-    """加载 config.yaml，并注入 forex_pairs.yml 的 instruments / crypto_instruments 列表。"""
+    """加载 config.yaml，并注入 instruments.yaml 的 instruments / crypto_instruments 列表。"""
     with open(CONFIG_FILE, encoding="utf-8") as f:
         cfg = yaml.safe_load(f)
     cfg["instruments"] = get_instruments()
