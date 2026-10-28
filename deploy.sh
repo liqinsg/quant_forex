@@ -57,17 +57,25 @@ use_python() {
 
 train_all() {
     use_python
-    local pairs total i
-    pairs=$("$PY_BIN" -c "from config.pairs import get_all_instruments; print(' '.join(get_all_instruments()))")
-    total=$(echo "$pairs" | wc -w)
-    log_info "开始训练 $total 个品种（外汇+加密，串行执行，耗时较长；Ctrl-C 可中断，已完成的模型会保留）"
-    i=0
-    for inst in $pairs; do
-        i=$((i+1))
-        log_info "Training $inst ... ($i/$total)"
-        "$PY_BIN" models/train_lgb_signal.py "$inst"
-    done
-    log_info "All trained ✅ ($total/$total)"
+    local env="practice" live_flag=""
+    if [[ "${1:-}" == "--live" ]]; then
+        env="live"
+        live_flag="--live"
+        log_info "🔄 训练环境: LIVE → models/model_store/live/"
+    else
+        log_info "🔄 训练环境: PRACTICE → models/model_store/practice/"
+    fi
+
+    local total
+    total=$(OANDA_ENV="$env" "$PY_BIN" -c "from config.pairs import get_all_instruments; print(len(get_all_instruments()))")
+    log_info "开始训练 $total 个品种（环境: $env，串行执行，耗时较长；Ctrl-C 可中断）"
+
+    # 关键：先 export，再调用，确保脚本拿到最新值；--live 也显式透传给脚本（双保险，
+    # 脚本会在 import config 之前把 OANDA_ENV 写死，覆盖 .env/run.env 里的 practice）
+    export OANDA_ENV="$env"
+    "$PY_BIN" models/train_lgb_signal.py ALL $live_flag
+
+    log_info "✅ All trained → models/model_store/$env/ ($total/$total)"
 }
 
 BOT_PID=reports/bot.pid
@@ -154,7 +162,8 @@ show_menu() {
     echo "Usage:"
     echo "  ./deploy.sh init         → Full setup"
     echo "  ./deploy.sh deps         → Reinstall deps"
-    echo "  ./deploy.sh train        → Train all forex + crypto (foreground)"
+    echo "  ./deploy.sh train        → Train all forex + crypto → model_store/practice"
+    echo "  ./deploy.sh train --live → Train all forex + crypto → model_store/live"
     echo "  ./deploy.sh start        → Foreground bot run"
     echo "  ./deploy.sh daemon       → Start both: bot + weekly trainer"
     echo "  ./deploy.sh stop         → Stop both"
@@ -175,7 +184,7 @@ show_menu() {
 case "${1:-init}" in
     init) check_python; install_sys_deps; setup_venv; install_python_deps; setup_dirs; setup_env; show_menu ;;
     deps) setup_venv; install_python_deps ;;
-    train) train_all ;;
+    train) train_all "${@:2}" ;;
     start) use_python; "$PY_BIN" main_loop_v2.py "${@:2}" ;;
     daemon) start_bot "${@:2}"; start_weekly ;;
     stop) stop_all ;;
