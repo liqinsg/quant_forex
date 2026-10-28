@@ -11,7 +11,7 @@ sys.path.insert(0, str(PROJECT_ROOT))
 
 
 def _parse_args():
-    """CLI 参数：--live 切到实盘；--account/-a 选择账号序号（1-based）。"""
+    """CLI 参数：--live 切到实盘；--account/-a 选择账号（a/c id 或 1-based 序号）。"""
     parser = argparse.ArgumentParser(description="Forex OANDA 主循环")
     parser.add_argument(
         "--live",
@@ -21,10 +21,11 @@ def _parse_args():
     parser.add_argument(
         "--account",
         "-a",
-        type=int,
-        default=1,
-        metavar="N",
-        help="选择账号序号 N（1-based）；--live 对应 live 账号，缺省对应 demo 账号",
+        type=str,
+        default=None,
+        metavar="ID",
+        help="选择账号：填完整 a/c id（如 101-003-39389016-005）或 1-based 序号；"
+        "缺省时按 run.env > config/.env > 名单第 1 个 解析",
     )
     parser.add_argument(
         "--lots",
@@ -80,7 +81,10 @@ ARGS = _parse_args()
 # 关键：必须在 import config.config_oanda 之前写死环境，
 # 才能保证 live/demo 各自使用正确的 TOKEN 与账号列表（.env 以 override=False 加载，不会覆盖）
 os.environ["OANDA_ENV"] = "live" if ARGS.live else "practice"
-os.environ["OANDA_ACCOUNT_INDEX"] = str(ARGS.account)
+if ARGS.account:
+    # CLI 传 a/c id（或 1-based 序号）；用独立变量桥接到 config_oanda，
+    # 使所有模块的 get_oanda_profile() 都跟随 CLI 选择（优先级高于 run.env/.env）
+    os.environ["OANDA_ACCOUNT_CLI"] = str(ARGS.account)
 
 import time
 import warnings
@@ -89,7 +93,6 @@ from datetime import datetime
 from config.config_oanda import get_oanda_profile, is_market_open
 from config import load_config, model_dir, current_env, LAST_RETRAIN_FILE
 from config.pairs import is_crypto
-from config.correlation_groups import PAIR_TO_GROUP
 from utils.logging_utils import get_logger
 from utils.structured_logger import StructuredLogger
 
@@ -169,36 +172,6 @@ def _resolve_float(env_key, yaml_path, default):
         return float(default)
 
 
-def _resolve_bool(env_key, yaml_path, default):
-    """优先级：环境变量 > yaml > default；支持 true/false/1/0/yes/no/on/off。"""
-    TRUE_VALUES = {"true", "1", "yes", "on"}
-    FALSE_VALUES = {"false", "0", "no", "off"}
-
-    raw = os.getenv(env_key, "").strip().lower()
-    if raw:
-        if raw in TRUE_VALUES:
-            return True
-        if raw in FALSE_VALUES:
-            return False
-        log.warning(f"⚠️ 环境变量 {env_key}={raw} 无效，回退到 YAML")
-
-    node = CFG
-    try:
-        for key in yaml_path.split("."):
-            node = node[key]
-        if isinstance(node, bool):
-            return node
-        val = str(node).strip().lower()
-        if val in TRUE_VALUES:
-            return True
-        if val in FALSE_VALUES:
-            return False
-        log.warning(f"⚠️ YAML {yaml_path}={node} 无效，回退默认 {default}")
-    except (KeyError, TypeError, ValueError):
-        pass
-    return bool(default)
-
-
 # 中心化日志：主循环用统一 logger，结构化日志记录主动(BOT)操作（按环境分文件）
 log = get_logger("main_loop")
 struct_log = StructuredLogger(OANDA_ENV)
@@ -251,16 +224,6 @@ MAX_OPEN_PER_GROUP_CRYPTO = int(
 # 全局上限（仅 OVERRIDE_MAX_OPEN=0 时生效；0 表示不限，保持旧行为）
 MAX_OPEN = int(_resolve_float("MAX_OPEN", "risk.max_open", 0))
 
-# 关联冲突隔离 v1.0 — 已完整接入主循环
-# 优先级：环境变量 > config.yaml > 代码默认值
-# 代码默认 False，实际生效以 run.env/config.yaml 为准
-CORRELATION_CHECK_ENABLED = _resolve_bool(
-    "CORRELATION_CHECK_ENABLED", "risk.correlation_check_enabled", False
-)
-CORRELATION_JPY_STRICT = _resolve_bool(
-    "CORRELATION_JPY_STRICT", "risk.correlation_jpy_strict", True
-)
-
 # 导入：从 forex_oanda 包加载
 from data.fetch_oanda import update_csv
 from features.build_features import add_ta_features
@@ -268,9 +231,7 @@ from models.train_lgb_signal import load_model, run_full_training
 from execution.oanda_conn import (
     place_market_order,
     close_position,
-    get_bot_positions_and_snapshot,
     get_open_position,
-    get_open_position_snapshot,
     has_open_bot_trade,
     open_bot_instruments,
     set_dry_run,
@@ -491,9 +452,9 @@ def analyze_cycle(inst):
             tp = close + _atr_tp_mult_for(inst) * abs(close - sl)
             return result, {
                 "inst": inst, "group": _group_for(inst), "direction": "LONG",
-                "prob": prob, "signal_strength": prob, "score_final": prob,
-                "units": units, "sl": sl, "tp": tp, "close": close,
-                "thr_desc": thr_desc, "long_thr": long_thr, "short_thr": short_thr,
+                "prob": prob, "signal_strength": prob, "units": units,
+                "sl": sl, "tp": tp, "close": close, "thr_desc": thr_desc,
+                "long_thr": long_thr, "short_thr": short_thr,
             }
         log.info(f"⏸️ 观望 {inst} | 概率: {prob:.1%} | 阈值: {thr_desc} | 原因: 已有持仓")
         struct_log.skip_signal(inst, "has_position", prob=prob,
@@ -527,9 +488,9 @@ def analyze_cycle(inst):
             tp = close - _atr_tp_mult_for(inst) * abs(sl - close)
             return result, {
                 "inst": inst, "group": _group_for(inst), "direction": "SHORT",
-                "prob": prob, "signal_strength": 1.0 - prob, "score_final": 1.0 - prob,
-                "units": -units, "sl": sl, "tp": tp, "close": close,
-                "thr_desc": thr_desc, "long_thr": long_thr, "short_thr": short_thr,
+                "prob": prob, "signal_strength": 1.0 - prob, "units": -units,
+                "sl": sl, "tp": tp, "close": close, "thr_desc": thr_desc,
+                "long_thr": long_thr, "short_thr": short_thr,
             }
         log.info(f"⏸️ 观望 {inst} | 概率: {prob:.1%} | 阈值: {thr_desc} | 原因: 已有持仓")
         struct_log.skip_signal(inst, "has_position", prob=prob,
@@ -554,155 +515,11 @@ def _place_candidate(cand):
     log.info(f"{icon} 开{'多' if direction == 'LONG' else '空'}仓 {inst} | 概率: {prob:.1%} | 入场价: {cand['close']:.4f}")
     struct_log.bot_open(pair=inst, direction=direction, units=cand["units"],
                         entry_price=cand["close"], trade_id=_extract_open_trade_id(resp),
-                        sl=cand["sl"], tp=cand["tp"], score_final=cand["score_final"])
-
-
-def _check_correlation_conflict(cand, positions_snapshot):
-    """检查候选品种是否与已持仓存在关联组反向冲突。
-
-    返回 (should_block, reason)：
-      should_block=True  → 必须拦截跳过
-      reason             → 日志描述
-    未分组 / 同向持仓 / 无快照 → (False, "pass")
-    """
-    inst = cand["inst"]
-    c_dir = cand["direction"]
-    group_key = PAIR_TO_GROUP.get(inst)
-    if group_key is None:
-        return False, "ungrouped_pass"
-
-    opposite_map = {"LONG": "SHORT", "SHORT": "LONG"}
-    needed = opposite_map[c_dir]
-
-    conflicted = []
-    for p_inst, p_info in positions_snapshot.items():
-        p_group = PAIR_TO_GROUP.get(p_inst)
-        if p_group != group_key:
-            continue
-        if p_info["direction"] == needed:
-            conflicted.append(p_inst)
-
-    if not conflicted:
-        return False, "no_opposite_in_group"
-
-    # 有反向持仓 → 应用放行规则
-    if group_key == "jpy_cross" and not CORRELATION_JPY_STRICT:
-        log.warning(
-            f"⚠️ JPY组非严格模式放行反向冲突: {inst}({c_dir}) vs {group_key} 组反向持仓 {conflicted}"
-        )
-        return False, f"jpy_non_strict_allow_opposite:{','.join(conflicted)}"
-
-    return True, f"group_{group_key}_opposite:{','.join(conflicted)}"
-
-
-def select_candidates(candidates, instruments, positions_snapshot=None):
-    """候选筛选：交易分组控仓 + 关联组冲突检查 + score_final 择优。
-
-    保留现有 forex/crypto 分组控仓、max_open 逻辑不变；
-    positions_snapshot 存在时，按 PAIR_TO_GROUP 做关联组反向持仓拦截。
-    OVERRIDE_MAX_OPEN=0 时回退旧模式：不做每组择优，仅按需过滤关联冲突。
-
-    参数:
-        candidates:        analyze_cycle 输出的候选 dict 列表
-        instruments:       open_bot_instruments() 返回的已持仓品种 list（用于分组控仓）
-        positions_snapshot: get_open_position_snapshot() 返回的持仓快照 dict；
-                           None 时跳过关联检查
-
-    返回:
-        (selected, observe_count):
-          selected       — 最终应下单的候选列表
-          observe_count  — 被拦截/落选/达上限的候选总数
-    """
-    if not OVERRIDE_MAX_OPEN:
-        filtered = list(candidates)
-        if CORRELATION_CHECK_ENABLED and positions_snapshot is not None:
-            kept = []
-            for c in filtered:
-                inst = c["inst"]
-                corr_group = PAIR_TO_GROUP.get(inst)
-                if corr_group is None:
-                    kept.append(c)
-                    continue
-                should_block, _ = _check_correlation_conflict(c, positions_snapshot)
-                if not should_block:
-                    kept.append(c)
-            filtered = kept
-        observe = len(candidates) - len(filtered)
-        return filtered, observe
-
-    selected = []
-    observe_count = 0
-
-    for grp in ("forex", "crypto"):
-        grp_candidates = [c for c in candidates if c["group"] == grp]
-        if not grp_candidates:
-            continue
-
-        # 现有分组控仓：达上限 → 整组跳过
-        open_now = _count_open_in_group(instruments, grp)
-        grp_limit = _group_max_open(grp)
-        if grp_limit > 0 and open_now >= grp_limit:
-            log.info(f"📦 {grp} 组已达上限 {open_now}/{grp_limit}，跳过开仓")
-            for c in grp_candidates:
-                struct_log.skip_signal(
-                    c["inst"], "group_cap",
-                    detail=f"{grp}:{open_now}/{grp_limit}",
-                    prob=c["prob"],
-                    prob_long_threshold=c["long_thr"],
-                    prob_short_threshold=c["short_thr"],
-                )
-            observe_count += len(grp_candidates)
-            continue
-
-        # 关联组冲突检查（快照存在且开关开启）
-        filtered = []
-        for c in grp_candidates:
-            if positions_snapshot is not None and CORRELATION_CHECK_ENABLED:
-                should_block, reason = _check_correlation_conflict(c, positions_snapshot)
-                if should_block:
-                    log.info(
-                        f"🚫 拦截 {c['inst']}({c['direction']}) | 关联组冲突: {reason}"
-                    )
-                    struct_log.skip_signal(
-                        c["inst"], "correlation_conflict",
-                        detail=reason, prob=c["prob"],
-                        prob_long_threshold=c["long_thr"],
-                        prob_short_threshold=c["short_thr"],
-                    )
-                    observe_count += 1
-                    continue
-            filtered.append(c)
-
-        if not filtered:
-            continue
-
-        # score_final 降序择优：每组只取信号最强的 1 个
-        filtered.sort(key=lambda x: x["score_final"], reverse=True)
-        best = filtered[0]
-        log.info(
-            f"✅ {grp} 组最优: {best['inst']} (score_final={best['score_final']:.4f}) → 开仓"
-        )
-        selected.append(best)
-        for c in filtered[1:]:
-            struct_log.skip_signal(
-                c["inst"], "not_selected",
-                detail=f"{grp}:lower_score",
-                prob=c["prob"],
-                prob_long_threshold=c["long_thr"],
-                prob_short_threshold=c["short_thr"],
-            )
-        observe_count += len(filtered) - 1
-
-    return selected, observe_count
+                        sl=cand["sl"], tp=cand["tp"], score_final=prob)
 
 
 def run_cycle(ready):
-    """一轮完整处理：先分析（含平仓/反手），再按分组控仓+关联冲突选最优开仓。
-
-    关键设计:
-      - analyze_cycle() 跑完所有品种 → 平仓/反手先执行完 → 此时持仓才是最终状态
-      - 之后才取 positions_snapshot → 不会把刚平掉的仓算进关联冲突
-      - 快照查询失败 → 只跳过本轮新开仓，不影响已执行的平仓/统计
+    """一轮完整处理：先分析（含平仓/反手），再按分组控仓选最优开仓。
 
     返回本轮计数 {"open","close","observe","fail"}。
     """
@@ -722,28 +539,47 @@ def run_cycle(ready):
     if not candidates:
         return totals
 
-    positions, positions_snapshot = get_bot_positions_and_snapshot()
+    # 统计当前 bot 已开持仓（查询失败则本轮不开仓，fail-closed）
+    positions = open_bot_instruments()
     if positions is None:
         log.warning("⚠️ 无法读取当前持仓，本轮跳过所有开仓")
         totals["observe"] += len(candidates)
         return totals
 
-    if CORRELATION_CHECK_ENABLED and positions_snapshot is None:
-        log.warning("⚠️ 持仓快照查询失败，本轮跳过关联冲突筛选与新开仓")
-        totals["observe"] += len(candidates)
-        return totals
+    # 分组控仓：每组只选信号最强（signal_strength 最大）的 1 个开仓
+    for grp in ("forex", "crypto"):
+        grp_candidates = [c for c in candidates if c["group"] == grp]
+        if not grp_candidates:
+            continue
+        open_now = _count_open_in_group(positions, grp)
+        grp_limit = _group_max_open(grp)
+        if grp_limit > 0 and open_now >= grp_limit:
+            log.info(f"📦 {grp} 组已达上限 {open_now}/{grp_limit}，跳过开仓")
+            for c in grp_candidates:
+                struct_log.skip_signal(c["inst"], "group_cap",
+                                       detail=f"{grp}:{open_now}/{grp_limit}",
+                                       prob=c["prob"],
+                                       prob_long_threshold=c["long_thr"],
+                                       prob_short_threshold=c["short_thr"])
+            totals["observe"] += len(grp_candidates)
+            continue
 
-    if not CORRELATION_CHECK_ENABLED:
-        positions_snapshot = None
-
-    selected, observe_cnt = select_candidates(candidates, positions, positions_snapshot)
-    totals["observe"] += observe_cnt
-
-    for best in selected:
+        grp_candidates.sort(key=lambda x: x["signal_strength"], reverse=True)
+        best = grp_candidates[0]
+        log.info(f"✅ {grp} 组最优: {best['inst']} (信号分={best['signal_strength']:.4f}) → 开仓")
         _place_candidate(best)
         totals["open"] += 1
+        # 同组落选者计为观望
+        for c in grp_candidates[1:]:
+            struct_log.skip_signal(c["inst"], "not_selected",
+                                   detail=f"{grp}:lower_strength",
+                                   prob=c["prob"],
+                                   prob_long_threshold=c["long_thr"],
+                                   prob_short_threshold=c["short_thr"])
+        totals["observe"] += len(grp_candidates) - 1
 
     return totals
+
 
 
 if __name__ == "__main__":
@@ -751,13 +587,18 @@ if __name__ == "__main__":
     log.info(f"环境: {current_env()} | 模型目录: {MODEL_DIR}")
 
     n_accounts = len(profile["account_ids"])
-    if not (1 <= ARGS.account <= n_accounts):
+    if not OANDA_ACCOUNT_ID:
         log.error(
-            f"❌ --account {ARGS.account} 超出范围: 当前 {OANDA_ENV.upper()} 环境有 "
-            f"{n_accounts} 个账号，可选 1..{n_accounts}"
+            "❌ 无法解析账号：请检查 --account / run.env / config/.env 的账号配置"
         )
         sys.exit(1)
-    log.info(f"账号: {OANDA_ENV.upper()} #{ARGS.account} → {OANDA_ACCOUNT_ID}")
+    source = f"--account {ARGS.account}" if ARGS.account else "配置默认"
+    log.info(f"账号: {OANDA_ENV.upper()} ({source}) → {OANDA_ACCOUNT_ID}")
+    if OANDA_ACCOUNT_ID not in profile["account_ids"]:
+        log.warning(
+            f"⚠️ 账号 {OANDA_ACCOUNT_ID} 不在 {OANDA_ENV.upper()} 名单"
+            f"（{n_accounts} 个）中，仍按该账号运行"
+        )
     if TRADE_MODE == "crypto":
         log.info("下单手数: %s units(加密)", _fmt_units(CRYPTO_LOT_SIZE))
     else:
