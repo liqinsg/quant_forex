@@ -29,7 +29,7 @@ forex:
   - EURCAD
   - AUDCAD
 crypto:
-  - BTC_USD
-  - ETH_USD
+  #- BTC_USD
+  #- ETH_USD
   - LTC_USD
   - BCH_USD
