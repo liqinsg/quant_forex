@@ -1,13 +1,22 @@
 # 文件顶部改导入路径
+import os
 import sys
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+# 关键：必须在 import config.config_oanda 之前写死环境。
+# config_oanda 以 override=False 加载 .env / run.env，因此此处显式设置的
+# OANDA_ENV 会覆盖它们里面的 OANDA_ENV=practice。
+# --live → 训练写入 models/model_store/live/；否则沿用外部 OANDA_ENV（缺省 practice）。
+if "--live" in sys.argv[1:]:
+    os.environ["OANDA_ENV"] = "live"
+    sys.argv.remove("--live")
+
 from data.fetch_oanda import update_csv
 from features import build_features
-import os, yaml, pandas as pd, numpy as np, lightgbm as lgb, pickle
+import yaml, pandas as pd, numpy as np, lightgbm as lgb, pickle
 from sklearn.metrics import roc_auc_score
-from config import load_config, model_dir
+from config import load_config, model_dir, current_env
 from config.pairs import is_crypto
 CFG = load_config()
 
@@ -54,5 +63,15 @@ def run_full_training(instrument, env=None):
     print(f"Mean AUC: {np.mean(aucs):.4f} — saved lgb_{instrument}.pkl")
 
 if __name__ == "__main__":
-    import sys
-    run_full_training(sys.argv[1] if len(sys.argv)>1 else "EUR_USD")
+    # 用法: python models/train_lgb_signal.py <INST|ALL> [--live]
+    # --live 或 OANDA_ENV 决定环境，模型写入 models/model_store/<env>/
+    target = sys.argv[1] if len(sys.argv) > 1 else "EUR_USD"
+    if target.strip().upper() == "ALL":
+        from config.pairs import get_all_instruments
+
+        instruments = get_all_instruments()
+        print(f"训练全部 {len(instruments)} 个品种 → 环境 {current_env()} → {model_dir()}")
+        for inst in instruments:
+            run_full_training(inst)
+    else:
+        run_full_training(target)
