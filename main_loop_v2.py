@@ -89,6 +89,7 @@ from datetime import datetime
 from config.config_oanda import get_oanda_profile, is_market_open
 from config import load_config, model_dir, current_env, LAST_RETRAIN_FILE
 from config.pairs import is_crypto
+from config.correlation_groups import PAIR_TO_GROUP
 from utils.logging_utils import get_logger
 from utils.structured_logger import StructuredLogger
 
@@ -168,6 +169,36 @@ def _resolve_float(env_key, yaml_path, default):
         return float(default)
 
 
+def _resolve_bool(env_key, yaml_path, default):
+    """优先级：环境变量 > yaml > default；支持 true/false/1/0/yes/no/on/off。"""
+    TRUE_VALUES = {"true", "1", "yes", "on"}
+    FALSE_VALUES = {"false", "0", "no", "off"}
+
+    raw = os.getenv(env_key, "").strip().lower()
+    if raw:
+        if raw in TRUE_VALUES:
+            return True
+        if raw in FALSE_VALUES:
+            return False
+        log.warning(f"⚠️ 环境变量 {env_key}={raw} 无效，回退到 YAML")
+
+    node = CFG
+    try:
+        for key in yaml_path.split("."):
+            node = node[key]
+        if isinstance(node, bool):
+            return node
+        val = str(node).strip().lower()
+        if val in TRUE_VALUES:
+            return True
+        if val in FALSE_VALUES:
+            return False
+        log.warning(f"⚠️ YAML {yaml_path}={node} 无效，回退默认 {default}")
+    except (KeyError, TypeError, ValueError):
+        pass
+    return bool(default)
+
+
 # 中心化日志：主循环用统一 logger，结构化日志记录主动(BOT)操作（按环境分文件）
 log = get_logger("main_loop")
 struct_log = StructuredLogger(OANDA_ENV)
@@ -220,6 +251,14 @@ MAX_OPEN_PER_GROUP_CRYPTO = int(
 # 全局上限（仅 OVERRIDE_MAX_OPEN=0 时生效；0 表示不限，保持旧行为）
 MAX_OPEN = int(_resolve_float("MAX_OPEN", "risk.max_open", 0))
 
+# 关联组风控开关（第1段骨架：仅配置加载，暂不接入主循环逻辑）
+CORRELATION_CHECK_ENABLED = _resolve_bool(
+    "CORRELATION_CHECK_ENABLED", "risk.correlation_check_enabled", False
+)
+CORRELATION_JPY_STRICT = _resolve_bool(
+    "CORRELATION_JPY_STRICT", "risk.correlation_jpy_strict", True
+)
+
 # 导入：从 forex_oanda 包加载
 from data.fetch_oanda import update_csv
 from features.build_features import add_ta_features
@@ -228,6 +267,7 @@ from execution.oanda_conn import (
     place_market_order,
     close_position,
     get_open_position,
+    get_open_position_snapshot,
     has_open_bot_trade,
     open_bot_instruments,
     set_dry_run,
@@ -448,9 +488,9 @@ def analyze_cycle(inst):
             tp = close + _atr_tp_mult_for(inst) * abs(close - sl)
             return result, {
                 "inst": inst, "group": _group_for(inst), "direction": "LONG",
-                "prob": prob, "signal_strength": prob, "units": units,
-                "sl": sl, "tp": tp, "close": close, "thr_desc": thr_desc,
-                "long_thr": long_thr, "short_thr": short_thr,
+                "prob": prob, "signal_strength": prob, "score_final": prob,
+                "units": units, "sl": sl, "tp": tp, "close": close,
+                "thr_desc": thr_desc, "long_thr": long_thr, "short_thr": short_thr,
             }
         log.info(f"⏸️ 观望 {inst} | 概率: {prob:.1%} | 阈值: {thr_desc} | 原因: 已有持仓")
         struct_log.skip_signal(inst, "has_position", prob=prob,
@@ -484,9 +524,9 @@ def analyze_cycle(inst):
             tp = close - _atr_tp_mult_for(inst) * abs(sl - close)
             return result, {
                 "inst": inst, "group": _group_for(inst), "direction": "SHORT",
-                "prob": prob, "signal_strength": 1.0 - prob, "units": -units,
-                "sl": sl, "tp": tp, "close": close, "thr_desc": thr_desc,
-                "long_thr": long_thr, "short_thr": short_thr,
+                "prob": prob, "signal_strength": 1.0 - prob, "score_final": 1.0 - prob,
+                "units": -units, "sl": sl, "tp": tp, "close": close,
+                "thr_desc": thr_desc, "long_thr": long_thr, "short_thr": short_thr,
             }
         log.info(f"⏸️ 观望 {inst} | 概率: {prob:.1%} | 阈值: {thr_desc} | 原因: 已有持仓")
         struct_log.skip_signal(inst, "has_position", prob=prob,
@@ -514,8 +554,134 @@ def _place_candidate(cand):
                         sl=cand["sl"], tp=cand["tp"], score_final=prob)
 
 
+def _check_correlation_conflict(cand, positions_snapshot):
+    """检查候选品种是否与已持仓存在关联组反向冲突。
+
+    返回 (should_block, reason)：
+      should_block=True  → 必须拦截跳过
+      reason             → 日志描述
+    未分组 / 同向持仓 / 无快照 → (False, "pass")
+    """
+    inst = cand["inst"]
+    c_dir = cand["direction"]
+    group_key = PAIR_TO_GROUP.get(inst)
+    if group_key is None:
+        return False, "ungrouped_pass"
+
+    opposite_map = {"LONG": "SHORT", "SHORT": "LONG"}
+    needed = opposite_map[c_dir]
+
+    conflicted = []
+    for p_inst, p_info in positions_snapshot.items():
+        p_group = PAIR_TO_GROUP.get(p_inst)
+        if p_group != group_key:
+            continue
+        if p_info["direction"] == needed:
+            conflicted.append(p_inst)
+
+    if not conflicted:
+        return False, "no_opposite_in_group"
+
+    # 有反向持仓 → 应用放行规则
+    if group_key == "jpy_cross" and not CORRELATION_JPY_STRICT:
+        log.warning(
+            f"⚠️ JPY组非严格模式放行反向冲突: {inst}({c_dir}) vs {group_key} 组反向持仓 {conflicted}"
+        )
+        return False, f"jpy_non_strict_allow_opposite:{','.join(conflicted)}"
+
+    return True, f"group_{group_key}_opposite:{','.join(conflicted)}"
+
+
+def select_candidates(candidates, instruments, positions_snapshot=None):
+    """候选筛选：交易分组控仓 + 关联组冲突检查 + score_final 择优。
+
+    保留现有 forex/crypto 分组控仓、max_open 逻辑不变；
+    positions_snapshot 存在时，按 PAIR_TO_GROUP 做关联组反向持仓拦截。
+
+    参数:
+        candidates:        analyze_cycle 输出的候选 dict 列表
+        instruments:       open_bot_instruments() 返回的已持仓品种 list（用于分组控仓）
+        positions_snapshot: get_open_position_snapshot() 返回的持仓快照 dict；
+                           None 时跳过关联检查（等价于仅分组择优的旧行为）
+
+    返回:
+        (selected, observe_count):
+          selected       — 最终应下单的候选列表（每组最多 1 个，按 score_final 最强）
+          observe_count  — 被拦截/落选/达上限的候选总数
+    """
+    selected = []
+    observe_count = 0
+
+    for grp in ("forex", "crypto"):
+        grp_candidates = [c for c in candidates if c["group"] == grp]
+        if not grp_candidates:
+            continue
+
+        # 现有分组控仓：达上限 → 整组跳过
+        open_now = _count_open_in_group(instruments, grp)
+        grp_limit = _group_max_open(grp)
+        if grp_limit > 0 and open_now >= grp_limit:
+            log.info(f"📦 {grp} 组已达上限 {open_now}/{grp_limit}，跳过开仓")
+            for c in grp_candidates:
+                struct_log.skip_signal(
+                    c["inst"], "group_cap",
+                    detail=f"{grp}:{open_now}/{grp_limit}",
+                    prob=c["prob"],
+                    prob_long_threshold=c["long_thr"],
+                    prob_short_threshold=c["short_thr"],
+                )
+            observe_count += len(grp_candidates)
+            continue
+
+        # 关联组冲突检查（快照存在且开关开启）
+        filtered = []
+        for c in grp_candidates:
+            if positions_snapshot is not None and CORRELATION_CHECK_ENABLED:
+                should_block, reason = _check_correlation_conflict(c, positions_snapshot)
+                if should_block:
+                    log.info(
+                        f"🚫 拦截 {c['inst']}({c['direction']}) | 关联组冲突: {reason}"
+                    )
+                    struct_log.skip_signal(
+                        c["inst"], "correlation_conflict",
+                        detail=reason, prob=c["prob"],
+                        prob_long_threshold=c["long_thr"],
+                        prob_short_threshold=c["short_thr"],
+                    )
+                    observe_count += 1
+                    continue
+            filtered.append(c)
+
+        if not filtered:
+            continue
+
+        # score_final 降序择优：每组只取信号最强的 1 个
+        filtered.sort(key=lambda x: x["score_final"], reverse=True)
+        best = filtered[0]
+        log.info(
+            f"✅ {grp} 组最优: {best['inst']} (score_final={best['score_final']:.4f}) → 开仓"
+        )
+        selected.append(best)
+        for c in filtered[1:]:
+            struct_log.skip_signal(
+                c["inst"], "not_selected",
+                detail=f"{grp}:lower_score",
+                prob=c["prob"],
+                prob_long_threshold=c["long_thr"],
+                prob_short_threshold=c["short_thr"],
+            )
+        observe_count += len(filtered) - 1
+
+    return selected, observe_count
+
+
 def run_cycle(ready):
-    """一轮完整处理：先分析（含平仓/反手），再按分组控仓选最优开仓。
+    """一轮完整处理：先分析（含平仓/反手），再按分组控仓+关联冲突选最优开仓。
+
+    关键设计:
+      - analyze_cycle() 跑完所有品种 → 平仓/反手先执行完 → 此时持仓才是最终状态
+      - 之后才取 positions_snapshot → 不会把刚平掉的仓算进关联冲突
+      - 快照查询失败 → 只跳过本轮新开仓，不影响已执行的平仓/统计
 
     返回本轮计数 {"open","close","observe","fail"}。
     """
@@ -535,47 +701,29 @@ def run_cycle(ready):
     if not candidates:
         return totals
 
-    # 统计当前 bot 已开持仓（查询失败则本轮不开仓，fail-closed）
     positions = open_bot_instruments()
     if positions is None:
         log.warning("⚠️ 无法读取当前持仓，本轮跳过所有开仓")
         totals["observe"] += len(candidates)
         return totals
 
-    # 分组控仓：每组只选信号最强（signal_strength 最大）的 1 个开仓
-    for grp in ("forex", "crypto"):
-        grp_candidates = [c for c in candidates if c["group"] == grp]
-        if not grp_candidates:
-            continue
-        open_now = _count_open_in_group(positions, grp)
-        grp_limit = _group_max_open(grp)
-        if grp_limit > 0 and open_now >= grp_limit:
-            log.info(f"📦 {grp} 组已达上限 {open_now}/{grp_limit}，跳过开仓")
-            for c in grp_candidates:
-                struct_log.skip_signal(c["inst"], "group_cap",
-                                       detail=f"{grp}:{open_now}/{grp_limit}",
-                                       prob=c["prob"],
-                                       prob_long_threshold=c["long_thr"],
-                                       prob_short_threshold=c["short_thr"])
-            totals["observe"] += len(grp_candidates)
-            continue
+    # 平仓/反手全部执行完毕后，才取持仓快照
+    positions_snapshot = None
+    if CORRELATION_CHECK_ENABLED and candidates:
+        positions_snapshot = get_open_position_snapshot()
+        if positions_snapshot is None:
+            log.warning("⚠️ 持仓快照查询失败，本轮跳过关联冲突筛选与新开仓")
+            totals["observe"] += len(candidates)
+            return totals
 
-        grp_candidates.sort(key=lambda x: x["signal_strength"], reverse=True)
-        best = grp_candidates[0]
-        log.info(f"✅ {grp} 组最优: {best['inst']} (信号分={best['signal_strength']:.4f}) → 开仓")
+    selected, observe_cnt = select_candidates(candidates, positions, positions_snapshot)
+    totals["observe"] += observe_cnt
+
+    for best in selected:
         _place_candidate(best)
         totals["open"] += 1
-        # 同组落选者计为观望
-        for c in grp_candidates[1:]:
-            struct_log.skip_signal(c["inst"], "not_selected",
-                                   detail=f"{grp}:lower_strength",
-                                   prob=c["prob"],
-                                   prob_long_threshold=c["long_thr"],
-                                   prob_short_threshold=c["short_thr"])
-        totals["observe"] += len(grp_candidates) - 1
 
     return totals
-
 
 
 if __name__ == "__main__":

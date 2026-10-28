@@ -24,6 +24,10 @@ risk:
   max_open_per_group_crypto: 2
   override_max_open: 1
   max_open: 0
+  # 关联组风控：correlation_check_enabled=true 时按 CORRELATION_GROUPS 做组内相关性限制；
+  # correlation_jpy_strict=true 时 JPY 组使用严格模式。
+  correlation_check_enabled: true
+  correlation_jpy_strict: true
 
 signal:
   prob_long_threshold: 0.65 # long概率阈值 ，超过该概率则下单 # 0.65

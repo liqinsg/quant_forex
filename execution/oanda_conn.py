@@ -131,3 +131,36 @@ def has_open_bot_trade(instrument, units):
     except Exception:
         return False
     return False
+
+
+def get_open_position_snapshot():
+    """返回当前 bot(tag=fx_bot_v7*)的持仓快照。
+
+    按 instrument 聚合所有 open trades 的 currentUnits，net>0 记为 LONG，
+    net<0 记为 SHORT，net=0 跳过。
+    查询失败安全返回 None（调用方据此跳过关联组检查，保持流程连续）。
+
+    返回格式:
+        {inst: {"direction": "LONG"|"SHORT", "units": float}}
+    """
+    try:
+        resp = get_client().request(trades.OpenTrades(_account_id()))
+    except Exception:
+        return None
+    agg = {}
+    for trade in resp.get("trades", []):
+        tag = (trade.get("clientExtensions") or {}).get("tag") or ""
+        if not tag.startswith(_BOT_TRADE_TAG):
+            continue
+        inst = trade.get("instrument")
+        cur = float(trade.get("currentUnits", 0) or 0)
+        if cur == 0 or inst is None:
+            continue
+        agg[inst] = agg.get(inst, 0.0) + cur
+    result = {}
+    for inst, net in agg.items():
+        if net > 0:
+            result[inst] = {"direction": "LONG", "units": net}
+        elif net < 0:
+            result[inst] = {"direction": "SHORT", "units": net}
+    return result
