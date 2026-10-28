@@ -93,6 +93,7 @@ from datetime import datetime
 from config.config_oanda import get_oanda_profile, is_market_open
 from config import load_config, model_dir, current_env, LAST_RETRAIN_FILE, REPORTS_DIR
 from config.pairs import is_crypto
+from config.correlation_groups import group_of
 from utils.logging_utils import get_logger
 from utils.structured_logger import StructuredLogger
 
@@ -172,6 +173,33 @@ def _resolve_float(env_key, yaml_path, default):
         return float(default)
 
 
+def _resolve_bool(env_key, yaml_path, default):
+    """
+    布尔解析，优先级：环境变量 > config.yaml > 内置默认值
+    :param env_key: run.env 中的环境变量名，如 "CORRELATION_CHECK_ENABLED"
+    :param yaml_path: YAML 深层路径，点号分隔，如 "risk.correlation_check_enabled"
+    :param default: 兜底默认值
+    :return: bool 解析结果
+    """
+    raw = os.getenv(env_key, "").strip().lower()
+    if raw:
+        if raw in ("1", "true", "yes", "on"):
+            return True
+        if raw in ("0", "false", "no", "off"):
+            return False
+        log.warning(f"⚠️ 环境变量 {env_key}={raw} 无效，回退到 YAML")
+
+    node = CFG
+    try:
+        for key in yaml_path.split("."):
+            node = node[key]
+        if isinstance(node, bool):
+            return node
+        return str(node).strip().lower() in ("1", "true", "yes", "on")
+    except (KeyError, TypeError):
+        return bool(default)
+
+
 # 中心化日志：主循环用统一 logger，结构化日志记录主动(BOT)操作（按环境分文件）
 log = get_logger("main_loop")
 struct_log = StructuredLogger(OANDA_ENV)
@@ -224,6 +252,15 @@ MAX_OPEN_PER_GROUP_CRYPTO = int(
 # 全局上限（仅 OVERRIDE_MAX_OPEN=0 时生效；0 表示不限，保持旧行为）
 MAX_OPEN = int(_resolve_float("MAX_OPEN", "risk.max_open", 0))
 
+# 关联组风控：开启后同关联组内已持反向仓位的候选不开（组外一律放行）
+CORRELATION_CHECK_ENABLED = _resolve_bool(
+    "CORRELATION_CHECK_ENABLED", "risk.correlation_check_enabled", True
+)
+# JPY 交叉盘严格模式：True=JPY 组同样拦截反向冲突；False=JPY 组放宽放行
+CORRELATION_JPY_STRICT = _resolve_bool(
+    "CORRELATION_JPY_STRICT", "risk.correlation_jpy_strict", True
+)
+
 # 导入：从 forex_oanda 包加载
 from data.fetch_oanda import update_csv
 from features.build_features import add_ta_features
@@ -233,7 +270,7 @@ from execution.oanda_conn import (
     close_position,
     get_open_position,
     has_open_bot_trade,
-    open_bot_instruments,
+    get_open_position_snapshot,
     set_dry_run,
 )
 from execution.risk_gate import enhanced_risk_check, circuit
@@ -302,6 +339,28 @@ def _group_max_open(group):
 def _count_open_in_group(positions, group):
     """统计当前 bot 持仓中属于指定分组的数量（positions 为品种列表）。"""
     return sum(1 for inst in positions if _group_for(inst) == group)
+
+
+def _correlation_conflict(cand, snapshot):
+    """判断候选是否与 bot 现有持仓构成「同关联组反向」冲突。
+
+    规则：候选所属关联组内，若已有任意 bot 持仓方向与之相反 → 冲突（旧单优先）。
+    组外品种、或 JPY 组在宽松模式下，一律放行。
+    返回 (blocked, detail)。
+    """
+    grp = group_of(cand["inst"])
+    if not grp:
+        return False, ""
+    if grp == "jpy_cross" and not CORRELATION_JPY_STRICT:
+        return False, ""
+    for inst, pos in snapshot.items():
+        if inst == cand["inst"]:
+            continue
+        if group_of(inst) != grp:
+            continue
+        if pos["direction"] != cand["direction"]:
+            return True, f"同组反向 {inst}={pos['direction']}"
+    return False, ""
 
 
 def _fmt_units(units):
@@ -519,7 +578,13 @@ def _place_candidate(cand):
 
 
 def run_cycle(ready):
-    """一轮完整处理：先分析（含平仓/反手），再按分组控仓选最优开仓。
+    """一轮完整处理：先分析（含平仓/反手），再按分组各选 1 个开仓。
+
+    流程（Crypto 永远单列，不与外汇争名额）：
+      1) 分析全部品种（含平仓/反手），收集开仓候选；
+      2) 所有平仓动作完成后取 bot 持仓快照（供关联冲突判断 + 分组控仓，失败则跳过开仓）；
+      3) 关联冲突过滤（开启时）：同关联组内已有反向持仓的候选不开；
+      4) 外汇 / 加密各自按信号强度选最强 1 个开仓。
 
     返回本轮计数 {"open","close","observe","fail"}。
     """
@@ -539,11 +604,30 @@ def run_cycle(ready):
     if not candidates:
         return totals
 
-    # 统计当前 bot 已开持仓（查询失败则本轮不开仓，fail-closed）
-    positions = open_bot_instruments()
-    if positions is None:
+    # 全部平仓/反手执行完毕后再取快照，避免把本轮刚平的单误判为持仓
+    snapshot = get_open_position_snapshot()
+    if snapshot is None:
         log.warning("⚠️ 无法读取当前持仓，本轮跳过所有开仓")
         totals["observe"] += len(candidates)
+        return totals
+    positions = list(snapshot.keys())
+
+    # 关联冲突过滤：同关联组内已持反向仓位的候选本轮不开（组外一律放行）
+    if CORRELATION_CHECK_ENABLED:
+        kept = []
+        for c in candidates:
+            blocked, detail = _correlation_conflict(c, snapshot)
+            if blocked:
+                log.info(f"🚫 跳过 {c['inst']} | 关联组冲突: {detail}")
+                struct_log.skip_signal(c["inst"], "correlation_conflict",
+                                       detail=detail, prob=c["prob"],
+                                       prob_long_threshold=c["long_thr"],
+                                       prob_short_threshold=c["short_thr"])
+                totals["observe"] += 1
+            else:
+                kept.append(c)
+        candidates = kept
+    if not candidates:
         return totals
 
     # 分组控仓：每组只选信号最强（signal_strength 最大）的 1 个开仓
@@ -569,7 +653,6 @@ def run_cycle(ready):
         log.info(f"✅ {grp} 组最优: {best['inst']} (信号分={best['signal_strength']:.4f}) → 开仓")
         _place_candidate(best)
         totals["open"] += 1
-        # 同组落选者计为观望
         for c in grp_candidates[1:]:
             struct_log.skip_signal(c["inst"], "not_selected",
                                    detail=f"{grp}:lower_strength",
@@ -644,7 +727,7 @@ if __name__ == "__main__":
             )
     if OVERRIDE_MAX_OPEN:
         log.info(
-            "分组控仓: 外汇=%s | 加密=%s | 启用=True (每组每轮只开信号最强的 1 个)",
+            "分组控仓: 外汇上限=%s | 加密上限=%s | 启用=True (每组每轮只开信号最强的 1 个)",
             MAX_OPEN_PER_GROUP_FOREX,
             MAX_OPEN_PER_GROUP_CRYPTO,
         )
@@ -653,6 +736,11 @@ if __name__ == "__main__":
             "分组控仓: 启用=False | 全局上限 MAX_OPEN=%s (0=不限)",
             MAX_OPEN or "不限",
         )
+    log.info(
+        "关联组风控: 启用=%s | JPY严格=%s",
+        CORRELATION_CHECK_ENABLED,
+        CORRELATION_JPY_STRICT,
+    )
     if DRY_RUN:
         log.warning("🧪 DRY-RUN 模式: 正常运行但不会真正下单/平仓/改单")
 

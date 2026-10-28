@@ -92,24 +92,32 @@ def get_open_position(instrument):
     except: return {"has_position":False, "units":0, "unrealizedPL":0.0}
 
 
-def open_bot_instruments():
-    """返回当前 bot（tag=fx_bot_v7*）已开 open trades 的品种列表，按 trade 计数。
+def get_open_position_snapshot():
+    """按品种聚合当前 bot（tag=fx_bot_v7*）的净持仓方向与数量。
 
-    用于分组控仓统计；查询失败返回 None，调用方据此跳过本轮开仓（fail-closed）。
+    返回 {instrument: {"direction": "LONG"/"SHORT", "units": 绝对净单位数}}；
+    同一品种多笔 trade 先按 currentUnits 求和再定方向，净额为 0 的品种不返回。
+    查询失败返回 None，调用方据此跳过本轮开仓（fail-closed）。
     """
     try:
         resp = get_client().request(trades.OpenTrades(_account_id()))
     except Exception:
         return None
-    instruments = []
+    net = {}
     for trade in resp.get("trades", []):
         tag = (trade.get("clientExtensions") or {}).get("tag") or ""
         if not tag.startswith(_BOT_TRADE_TAG):
             continue
-        if float(trade.get("currentUnits", 0) or 0) == 0:
+        units = float(trade.get("currentUnits", 0) or 0)
+        if units == 0:
             continue
-        instruments.append(trade.get("instrument"))
-    return instruments
+        inst = trade.get("instrument")
+        net[inst] = net.get(inst, 0.0) + units
+    return {
+        inst: {"direction": "LONG" if units > 0 else "SHORT", "units": abs(units)}
+        for inst, units in net.items()
+        if units != 0
+    }
 
 
 def has_open_bot_trade(instrument, units):
