@@ -11,7 +11,7 @@ sys.path.insert(0, str(PROJECT_ROOT))
 
 
 def _parse_args():
-    """CLI 参数：--live 切到实盘；--account/-a 选择账号序号（1-based）。"""
+    """CLI 参数：--live 切到实盘；--account/-a 选择账号（a/c id 或 1-based 序号）。"""
     parser = argparse.ArgumentParser(description="Forex OANDA 主循环")
     parser.add_argument(
         "--live",
@@ -21,10 +21,11 @@ def _parse_args():
     parser.add_argument(
         "--account",
         "-a",
-        type=int,
-        default=1,
-        metavar="N",
-        help="选择账号序号 N（1-based）；--live 对应 live 账号，缺省对应 demo 账号",
+        type=str,
+        default=None,
+        metavar="ID",
+        help="选择账号：填完整 a/c id（如 101-003-39389016-005）或 1-based 序号；"
+        "缺省时按 run.env > config/.env > 名单第 1 个 解析",
     )
     parser.add_argument(
         "--lots",
@@ -80,7 +81,10 @@ ARGS = _parse_args()
 # 关键：必须在 import config.config_oanda 之前写死环境，
 # 才能保证 live/demo 各自使用正确的 TOKEN 与账号列表（.env 以 override=False 加载，不会覆盖）
 os.environ["OANDA_ENV"] = "live" if ARGS.live else "practice"
-os.environ["OANDA_ACCOUNT_INDEX"] = str(ARGS.account)
+if ARGS.account:
+    # CLI 传 a/c id（或 1-based 序号）；用独立变量桥接到 config_oanda，
+    # 使所有模块的 get_oanda_profile() 都跟随 CLI 选择（优先级高于 run.env/.env）
+    os.environ["OANDA_ACCOUNT_CLI"] = str(ARGS.account)
 
 import time
 import warnings
@@ -583,13 +587,18 @@ if __name__ == "__main__":
     log.info(f"环境: {current_env()} | 模型目录: {MODEL_DIR}")
 
     n_accounts = len(profile["account_ids"])
-    if not (1 <= ARGS.account <= n_accounts):
+    if not OANDA_ACCOUNT_ID:
         log.error(
-            f"❌ --account {ARGS.account} 超出范围: 当前 {OANDA_ENV.upper()} 环境有 "
-            f"{n_accounts} 个账号，可选 1..{n_accounts}"
+            "❌ 无法解析账号：请检查 --account / run.env / config/.env 的账号配置"
         )
         sys.exit(1)
-    log.info(f"账号: {OANDA_ENV.upper()} #{ARGS.account} → {OANDA_ACCOUNT_ID}")
+    source = f"--account {ARGS.account}" if ARGS.account else "配置默认"
+    log.info(f"账号: {OANDA_ENV.upper()} ({source}) → {OANDA_ACCOUNT_ID}")
+    if OANDA_ACCOUNT_ID not in profile["account_ids"]:
+        log.warning(
+            f"⚠️ 账号 {OANDA_ACCOUNT_ID} 不在 {OANDA_ENV.upper()} 名单"
+            f"（{n_accounts} 个）中，仍按该账号运行"
+        )
     if TRADE_MODE == "crypto":
         log.info("下单手数: %s units(加密)", _fmt_units(CRYPTO_LOT_SIZE))
     else:

@@ -45,7 +45,7 @@ Do not hardcode these values elsewhere in the codebase.
 import os
 import re
 import sys
-from dotenv import load_dotenv
+from dotenv import load_dotenv, dotenv_values
 from pathlib import Path
 import oandapyV20
 import oandapyV20.endpoints.accounts as oanda_accounts
@@ -54,6 +54,8 @@ import oandapyV20.endpoints.pricing as oanda_pricing
 PROJECT_ROOT = Path(__file__).resolve().parent
 load_dotenv(PROJECT_ROOT / ".env", override=False)
 load_dotenv(PROJECT_ROOT / "run.env", override=False)
+# run.env 自身键值（与 .env 隔离读取），用于账号选择优先级: CLI > run.env > .env > 缺省
+_RUN_ENV = dotenv_values(PROJECT_ROOT / "run.env")
 
 # 常量定义
 OANDA_ENV_DEMO = "practice"
@@ -106,12 +108,47 @@ else:
 OANDA_ACCOUNT_ID = OANDA_ACCOUNT_ID_1
 
 
+def _account_index_of(var_name: str) -> int:
+    """从 OANDA_ACCOUNT_ID_DEMO_3 / OANDA_ACCOUNT_ID_3_LIVE 提取序号，用于稳定排序。
+
+    直接按变量名字符串排序会把 DEMO_10 排到 DEMO_2 之前，导致按序号取账号错位。
+    """
+    m = re.search(r"(?:DEMO_|_)(\d+)(?:_LIVE)?$", var_name)
+    return int(m.group(1)) if m else 0
+
+
+def _select_account(account_list, raw_value):
+    """把配置值（a/c id 或 1-based 序号）解析成账号列表中的真实账号。
+
+    - 命中名单（含 '-' 的完整 a/c id）→ 返回名单中的原值
+    - 纯数字 → 视为 1-based 序号，取对应账号
+    - 形如 id 但不在名单 → 原样返回（.env 可能列了额外账号）
+    """
+    if raw_value is None:
+        return None
+    v = str(raw_value).strip().strip('"').strip("'")
+    if not v:
+        return None
+    if v in account_list:
+        return v
+    if v.isdigit():
+        i = int(v)
+        return account_list[i - 1] if 1 <= i <= len(account_list) else None
+    return v
+
+
 def get_oanda_profile(env_override: str = None, account_index: int = None) -> dict:
     """
     根据运行环境动态返回对应配置 Profile。
     :param env_override: "practice" | "demo" | "live" (若为 None 则强制读取 run.env 中的 OANDA_ENV)
-    :param account_index: 1-based 账号序号；None 时读取环境变量 OANDA_ACCOUNT_INDEX，再缺省为 1
+    :param account_index: (兼容旧签名) 1-based 账号序号
     :return: 包含 env, token, api, account_id, account_ids 的字典
+
+    账号解析优先级（值均为 a/c id，或 1-based 序号）：
+        1) CLI 参数（main_loop_v2 写入 OANDA_ACCOUNT_CLI）
+        2) run.env（隔离读取，不与 .env 混淆）
+        2.1) config/.env（仅本模块读取 .env）
+        3) 程序缺省（当前环境名单第 1 个）
     """
     # 核心修改 2：实时获取由 run.env 加载的最新 OANDA_ENV，不使用静态缓存
     current_run_env = os.getenv("OANDA_ENV", "practice")
@@ -132,17 +169,31 @@ def get_oanda_profile(env_override: str = None, account_index: int = None) -> di
             if value:
                 account_ids.append((name, value))
 
-    account_ids.sort(key=lambda x: x[0])
+    # 按序号数值排序（避免 DEMO_10 排到 DEMO_2 前）
+    account_ids.sort(key=lambda item: _account_index_of(item[0]))
     account_list = [acc_id for _, acc_id in account_ids]
 
-    # 账号选择：显式参数 > 环境变量 OANDA_ACCOUNT_INDEX (1-based) > 默认第 1 个
-    idx = account_index
-    if idx is None:
-        raw_idx = os.getenv("OANDA_ACCOUNT_INDEX", "").strip()
-        idx = int(raw_idx) if raw_idx.isdigit() else 1
-    if account_list and 1 <= idx <= len(account_list):
-        account_id = account_list[idx - 1]
-    else:
+    # 账号选择优先级：CLI > run.env > config/.env > 缺省(名单第 1 个)
+    # 各层值均为 a/c id（或兼容的 1-based 序号），由 _select_account 转换为真实账号。
+    env_key = "OANDA_ACCOUNT_ID_LIVE" if is_live else "OANDA_ACCOUNT_ID"
+    raw_account = None
+    if os.getenv("OANDA_ACCOUNT_CLI", "").strip():          # 1) CLI 参数（a/c id）
+        raw_account = os.getenv("OANDA_ACCOUNT_CLI")
+    elif (_RUN_ENV.get(env_key) or "").strip():             # 2) run.env（隔离读取）
+        raw_account = _RUN_ENV[env_key]
+    elif os.getenv(env_key, "").strip():                    # 2.1) config/.env（仅本模块读 .env）
+        raw_account = os.getenv(env_key)
+    elif os.getenv("OANDA_ACCOUNT_INDEX", "").strip():      # 兼容旧的序号环境变量
+        raw_account = os.getenv("OANDA_ACCOUNT_INDEX")
+
+    account_id = _select_account(account_list, raw_account)
+
+    # 兼容旧签名：显式 1-based 序号
+    if account_id is None and account_index is not None:
+        if account_list and 1 <= account_index <= len(account_list):
+            account_id = account_list[account_index - 1]
+
+    if account_id is None:
         account_id = account_list[0] if account_list else None
 
     # 初始化对应环境的 API Client
