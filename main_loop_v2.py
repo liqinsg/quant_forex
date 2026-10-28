@@ -91,7 +91,7 @@ import warnings
 import pandas as pd
 from datetime import datetime
 from config.config_oanda import get_oanda_profile, is_market_open
-from config import load_config, model_dir, current_env, LAST_RETRAIN_FILE
+from config import load_config, model_dir, current_env, LAST_RETRAIN_FILE, REPORTS_DIR
 from config.pairs import is_crypto
 from utils.logging_utils import get_logger
 from utils.structured_logger import StructuredLogger
@@ -599,6 +599,19 @@ if __name__ == "__main__":
             f"⚠️ 账号 {OANDA_ACCOUNT_ID} 不在 {OANDA_ENV.upper()} 名单"
             f"（{n_accounts} 个）中，仍按该账号运行"
         )
+
+    # 发布运行时状态，供 deploy.sh status 展示真实环境/账号/交易模式
+    # （run.env 只是缺省，CLI --live/-a/-f/-c/-b 可能已覆盖，不能据此判断运行态）
+    try:
+        REPORTS_DIR.mkdir(parents=True, exist_ok=True)
+        (REPORTS_DIR / "bot.runtime").write_text(
+            f"OANDA_ENV={OANDA_ENV}\n"
+            f"OANDA_ACCOUNT_ID={OANDA_ACCOUNT_ID}\n"
+            f"TRADE_MODE={TRADE_MODE}\n",
+            encoding="utf-8",
+        )
+    except Exception as exc:
+        log.warning(f"⚠️ 写入运行时状态失败: {exc}")
     if TRADE_MODE == "crypto":
         log.info("下单手数: %s units(加密)", _fmt_units(CRYPTO_LOT_SIZE))
     else:
