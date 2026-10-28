@@ -97,18 +97,9 @@ def open_bot_instruments():
 
     用于分组控仓统计；查询失败返回 None，调用方据此跳过本轮开仓（fail-closed）。
     """
-    try:
-        resp = get_client().request(trades.OpenTrades(_account_id()))
-    except Exception:
+    instruments, _ = get_bot_positions_and_snapshot()
+    if instruments is None:
         return None
-    instruments = []
-    for trade in resp.get("trades", []):
-        tag = (trade.get("clientExtensions") or {}).get("tag") or ""
-        if not tag.startswith(_BOT_TRADE_TAG):
-            continue
-        if float(trade.get("currentUnits", 0) or 0) == 0:
-            continue
-        instruments.append(trade.get("instrument"))
     return instruments
 
 
@@ -143,24 +134,38 @@ def get_open_position_snapshot():
     返回格式:
         {inst: {"direction": "LONG"|"SHORT", "units": float}}
     """
+    _, snap = get_bot_positions_and_snapshot()
+    return snap
+
+
+def get_bot_positions_and_snapshot():
+    """一次查询同时返回 instruments 列表 + 净值快照，减少接口调用。
+
+    返回:
+        (instruments, snapshot)  或  (None, None)  — 查询失败
+          instruments — list[str] 去重品种列表，含 net=0 品种（供分组控仓统计使用）
+          snapshot    — dict{inst: {"direction": str, "units": float}} 已过滤 net=0
+    """
     try:
         resp = get_client().request(trades.OpenTrades(_account_id()))
     except Exception:
-        return None
+        return None, None
+    instruments = []
     agg = {}
     for trade in resp.get("trades", []):
         tag = (trade.get("clientExtensions") or {}).get("tag") or ""
         if not tag.startswith(_BOT_TRADE_TAG):
             continue
         inst = trade.get("instrument")
-        cur = float(trade.get("currentUnits", 0) or 0)
-        if cur == 0 or inst is None:
+        if inst is None:
             continue
+        instruments.append(inst)
+        cur = float(trade.get("currentUnits", 0) or 0)
         agg[inst] = agg.get(inst, 0.0) + cur
-    result = {}
+    snapshot = {}
     for inst, net in agg.items():
         if net > 0:
-            result[inst] = {"direction": "LONG", "units": net}
+            snapshot[inst] = {"direction": "LONG", "units": net}
         elif net < 0:
-            result[inst] = {"direction": "SHORT", "units": net}
-    return result
+            snapshot[inst] = {"direction": "SHORT", "units": net}
+    return list(set(instruments)), snapshot

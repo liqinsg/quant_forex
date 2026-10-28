@@ -251,7 +251,9 @@ MAX_OPEN_PER_GROUP_CRYPTO = int(
 # 全局上限（仅 OVERRIDE_MAX_OPEN=0 时生效；0 表示不限，保持旧行为）
 MAX_OPEN = int(_resolve_float("MAX_OPEN", "risk.max_open", 0))
 
-# 关联组风控开关（第1段骨架：仅配置加载，暂不接入主循环逻辑）
+# 关联冲突隔离 v1.0 — 已完整接入主循环
+# 优先级：环境变量 > config.yaml > 代码默认值
+# 代码默认 False，实际生效以 run.env/config.yaml 为准
 CORRELATION_CHECK_ENABLED = _resolve_bool(
     "CORRELATION_CHECK_ENABLED", "risk.correlation_check_enabled", False
 )
@@ -266,6 +268,7 @@ from models.train_lgb_signal import load_model, run_full_training
 from execution.oanda_conn import (
     place_market_order,
     close_position,
+    get_bot_positions_and_snapshot,
     get_open_position,
     get_open_position_snapshot,
     has_open_bot_trade,
@@ -551,7 +554,7 @@ def _place_candidate(cand):
     log.info(f"{icon} 开{'多' if direction == 'LONG' else '空'}仓 {inst} | 概率: {prob:.1%} | 入场价: {cand['close']:.4f}")
     struct_log.bot_open(pair=inst, direction=direction, units=cand["units"],
                         entry_price=cand["close"], trade_id=_extract_open_trade_id(resp),
-                        sl=cand["sl"], tp=cand["tp"], score_final=prob)
+                        sl=cand["sl"], tp=cand["tp"], score_final=cand["score_final"])
 
 
 def _check_correlation_conflict(cand, positions_snapshot):
@@ -597,18 +600,36 @@ def select_candidates(candidates, instruments, positions_snapshot=None):
 
     保留现有 forex/crypto 分组控仓、max_open 逻辑不变；
     positions_snapshot 存在时，按 PAIR_TO_GROUP 做关联组反向持仓拦截。
+    OVERRIDE_MAX_OPEN=0 时回退旧模式：不做每组择优，仅按需过滤关联冲突。
 
     参数:
         candidates:        analyze_cycle 输出的候选 dict 列表
         instruments:       open_bot_instruments() 返回的已持仓品种 list（用于分组控仓）
         positions_snapshot: get_open_position_snapshot() 返回的持仓快照 dict；
-                           None 时跳过关联检查（等价于仅分组择优的旧行为）
+                           None 时跳过关联检查
 
     返回:
         (selected, observe_count):
-          selected       — 最终应下单的候选列表（每组最多 1 个，按 score_final 最强）
+          selected       — 最终应下单的候选列表
           observe_count  — 被拦截/落选/达上限的候选总数
     """
+    if not OVERRIDE_MAX_OPEN:
+        filtered = list(candidates)
+        if CORRELATION_CHECK_ENABLED and positions_snapshot is not None:
+            kept = []
+            for c in filtered:
+                inst = c["inst"]
+                corr_group = PAIR_TO_GROUP.get(inst)
+                if corr_group is None:
+                    kept.append(c)
+                    continue
+                should_block, _ = _check_correlation_conflict(c, positions_snapshot)
+                if not should_block:
+                    kept.append(c)
+            filtered = kept
+        observe = len(candidates) - len(filtered)
+        return filtered, observe
+
     selected = []
     observe_count = 0
 
@@ -701,20 +722,19 @@ def run_cycle(ready):
     if not candidates:
         return totals
 
-    positions = open_bot_instruments()
+    positions, positions_snapshot = get_bot_positions_and_snapshot()
     if positions is None:
         log.warning("⚠️ 无法读取当前持仓，本轮跳过所有开仓")
         totals["observe"] += len(candidates)
         return totals
 
-    # 平仓/反手全部执行完毕后，才取持仓快照
-    positions_snapshot = None
-    if CORRELATION_CHECK_ENABLED and candidates:
-        positions_snapshot = get_open_position_snapshot()
-        if positions_snapshot is None:
-            log.warning("⚠️ 持仓快照查询失败，本轮跳过关联冲突筛选与新开仓")
-            totals["observe"] += len(candidates)
-            return totals
+    if CORRELATION_CHECK_ENABLED and positions_snapshot is None:
+        log.warning("⚠️ 持仓快照查询失败，本轮跳过关联冲突筛选与新开仓")
+        totals["observe"] += len(candidates)
+        return totals
+
+    if not CORRELATION_CHECK_ENABLED:
+        positions_snapshot = None
 
     selected, observe_cnt = select_candidates(candidates, positions, positions_snapshot)
     totals["observe"] += observe_cnt
