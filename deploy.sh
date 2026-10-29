@@ -136,6 +136,8 @@ cmd_status() {
     echo "============================================================"
 
     local running=0
+    local position_env=""
+    local position_account_id=""
 
     # ---------- 主循环 ----------
     if [[ -f "$PID_FILE" ]]; then
@@ -168,6 +170,8 @@ cmd_status() {
                 # 去掉可能的引号
                 acc_id=$(echo "$acc_id" | sed -e 's/^"//' -e 's/"$//' -e "s/^'//" -e "s/'$//")
             fi
+            position_env="$env_info"
+            position_account_id="$acc_id"
             # 交易模式：优先运行时实际取值，回退 run.env 的 TRADE_MODE（CLI 覆盖 run.env）
             local trade_mode=""
             if [[ -f "$rt_file" ]]; then
@@ -232,7 +236,7 @@ cmd_status() {
     fi
 
     # ---------- 持仓总结（仅汇总，不显示明细） ----------
-    show_position_summary
+    show_position_summary "$position_env" "$position_account_id"
 
     echo "============================================================"
     return 0
@@ -240,7 +244,10 @@ cmd_status() {
 
 # 用 python 直接调用 check_order_details.py 的汇总函数，只打印 Summary 两行
 show_position_summary() {
+    local profile_env="${1:-}"
+    local account_id="${2:-}"
     local py=""
+    local -a profile_env_vars=()
     if [[ -x .venv/bin/python ]] && .venv/bin/python -c "import yaml, pandas" &>/dev/null; then
         py="$PWD/.venv/bin/python"
     else
@@ -248,8 +255,11 @@ show_position_summary() {
     fi
     [[ -n "$py" && -f check_order_details.py ]] || return 0
 
+    [[ -n "$profile_env" ]] && profile_env_vars+=("OANDA_ENV=$profile_env")
+    [[ -n "$account_id" ]] && profile_env_vars+=("OANDA_ACCOUNT_CLI=$account_id")
+
     local summary
-    summary=$(cd "$PWD" && timeout 60 "$py" -c '
+    summary=$(cd "$PWD" && timeout 60 env "${profile_env_vars[@]}" "$py" -c '
 import check_order_details as m
 lines = m.get_position_win_loss_message().splitlines()
 for ln in lines:
@@ -258,7 +268,11 @@ for ln in lines:
 ' 2>/dev/null) || { log_warn "持仓查询失败（OANDA 未连通？）"; return 0; }
 
     if [[ -n "$summary" ]]; then
-        echo "📊 持仓总结"
+        if [[ -n "$profile_env" || -n "$account_id" ]]; then
+            echo "📊 持仓总结 ($profile_env | $account_id)"
+        else
+            echo "📊 持仓总结"
+        fi
         while IFS= read -r line; do echo "   $line"; done <<< "$summary"
     fi
 }
