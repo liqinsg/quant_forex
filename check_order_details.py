@@ -9,15 +9,23 @@ from datetime import datetime, timezone
 if len(sys.argv) > 1 and sys.argv[1].strip():
     os.environ["OANDA_ACCOUNT_CLI"] = sys.argv[1].strip()
 
-try:
-    # gemini_ai 项目：utils.oanda_execution 暴露模块级 api / OANDA_ACCOUNT_ID
-    from utils.oanda_execution import api, OANDA_ACCOUNT_ID
-except ImportError:
-    # forex_oanda_v7 项目：沿用其原生 Profile（config.config_oanda.get_oanda_profile）
-    from config.config_oanda import get_oanda_profile
+from config.config_oanda import get_oanda_profile
+
+_profile = None
+if len(sys.argv) > 1 and sys.argv[1].strip() and not sys.argv[1].strip().isdigit():
+    # A full account ID identifies its environment, even if run.env selects the other one.
+    requested_account = sys.argv[1].strip()
+    for _env in ("live", "practice"):
+        _candidate = get_oanda_profile(env_override=_env)
+        if requested_account in _candidate["account_ids"]:
+            _profile = _candidate
+            break
+
+if _profile is None:
     _profile = get_oanda_profile()
-    api = _profile["oanda_client"]
-    OANDA_ACCOUNT_ID = _profile["account_id"]
+
+api = _profile["oanda_client"]
+OANDA_ACCOUNT_ID = _profile["account_id"]
 
 from oandapyV20.endpoints.positions import OpenPositions
 from oandapyV20.endpoints.trades import TradeDetails
