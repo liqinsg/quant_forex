@@ -231,8 +231,36 @@ cmd_status() {
         fi
     fi
 
+    # ---------- 持仓总结（仅汇总，不显示明细） ----------
+    show_position_summary
+
     echo "============================================================"
-    return $running
+    return 0
+}
+
+# 用 python 直接调用 check_order_details.py 的汇总函数，只打印 Summary 两行
+show_position_summary() {
+    local py=""
+    if [[ -x .venv/bin/python ]] && .venv/bin/python -c "import yaml, pandas" &>/dev/null; then
+        py="$PWD/.venv/bin/python"
+    else
+        py="$(command -v python || command -v python3 || true)"
+    fi
+    [[ -n "$py" && -f check_order_details.py ]] || return 0
+
+    local summary
+    summary=$(cd "$PWD" && timeout 60 "$py" -c '
+import check_order_details as m
+lines = m.get_position_win_loss_message().splitlines()
+for ln in lines:
+    if ln.startswith("Summary:") or ln.startswith("Grand TOTAL"):
+        print(ln)
+' 2>/dev/null) || { log_warn "持仓查询失败（OANDA 未连通？）"; return 0; }
+
+    if [[ -n "$summary" ]]; then
+        echo "📊 持仓总结"
+        while IFS= read -r line; do echo "   $line"; done <<< "$summary"
+    fi
 }
 
 status_all() {
@@ -311,8 +339,8 @@ case "${1:-init}" in
     daemon) start_bot "${@:2}"; start_weekly ;;
     stop) stop_all ;;
     restart) stop_all; start_bot "${@:2}"; start_weekly ;;
-    status) cmd_status ;;
-    status_all) status_all ;;
+    status) cmd_status || exit 0 ;;   # 主循环是否运行不影响脚本退出码（纯展示命令）
+    status_all) status_all || exit 0 ;;
     retrain-now) retrain_now ;;
     *) echo "Usage: $0 [init|deps|train|start|daemon|stop|restart|status|retrain-now]" ;;
 esac
