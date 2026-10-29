@@ -92,15 +92,32 @@ def get_open_position(instrument):
     except: return {"has_position":False, "units":0, "unrealizedPL":0.0}
 
 
-def open_bot_instruments():
-    """返回当前 bot（tag=fx_bot_v7*）已开 open trades 的品种列表，按 trade 计数。
+def get_open_position_snapshot():
+    """按品种聚合当前 bot（tag=fx_bot_v7*）的净持仓方向与数量。
 
-    用于分组控仓统计；查询失败返回 None，调用方据此跳过本轮开仓（fail-closed）。
+    返回 {instrument: {"direction": "LONG"/"SHORT", "units": 绝对净单位数}}；
+    同一品种多笔 trade 先按 currentUnits 求和再定方向，净额为 0 的品种不返回。
+    查询失败返回 None，调用方据此跳过本轮开仓（fail-closed）。
     """
-    instruments, _ = get_bot_positions_and_snapshot()
-    if instruments is None:
+    try:
+        resp = get_client().request(trades.OpenTrades(_account_id()))
+    except Exception:
         return None
-    return instruments
+    net = {}
+    for trade in resp.get("trades", []):
+        tag = (trade.get("clientExtensions") or {}).get("tag") or ""
+        if not tag.startswith(_BOT_TRADE_TAG):
+            continue
+        units = float(trade.get("currentUnits", 0) or 0)
+        if units == 0:
+            continue
+        inst = trade.get("instrument")
+        net[inst] = net.get(inst, 0.0) + units
+    return {
+        inst: {"direction": "LONG" if units > 0 else "SHORT", "units": abs(units)}
+        for inst, units in net.items()
+        if units != 0
+    }
 
 
 def has_open_bot_trade(instrument, units):
@@ -122,50 +139,3 @@ def has_open_bot_trade(instrument, units):
     except Exception:
         return False
     return False
-
-
-def get_open_position_snapshot():
-    """返回当前 bot(tag=fx_bot_v7*)的持仓快照。
-
-    按 instrument 聚合所有 open trades 的 currentUnits，net>0 记为 LONG，
-    net<0 记为 SHORT，net=0 跳过。
-    查询失败安全返回 None（调用方据此跳过关联组检查，保持流程连续）。
-
-    返回格式:
-        {inst: {"direction": "LONG"|"SHORT", "units": float}}
-    """
-    _, snap = get_bot_positions_and_snapshot()
-    return snap
-
-
-def get_bot_positions_and_snapshot():
-    """一次查询同时返回 instruments 列表 + 净值快照，减少接口调用。
-
-    返回:
-        (instruments, snapshot)  或  (None, None)  — 查询失败
-          instruments — list[str] 去重品种列表，含 net=0 品种（供分组控仓统计使用）
-          snapshot    — dict{inst: {"direction": str, "units": float}} 已过滤 net=0
-    """
-    try:
-        resp = get_client().request(trades.OpenTrades(_account_id()))
-    except Exception:
-        return None, None
-    instruments = []
-    agg = {}
-    for trade in resp.get("trades", []):
-        tag = (trade.get("clientExtensions") or {}).get("tag") or ""
-        if not tag.startswith(_BOT_TRADE_TAG):
-            continue
-        inst = trade.get("instrument")
-        if inst is None:
-            continue
-        instruments.append(inst)
-        cur = float(trade.get("currentUnits", 0) or 0)
-        agg[inst] = agg.get(inst, 0.0) + cur
-    snapshot = {}
-    for inst, net in agg.items():
-        if net > 0:
-            snapshot[inst] = {"direction": "LONG", "units": net}
-        elif net < 0:
-            snapshot[inst] = {"direction": "SHORT", "units": net}
-    return list(set(instruments)), snapshot

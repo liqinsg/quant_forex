@@ -93,6 +93,14 @@ from datetime import datetime
 from config.config_oanda import get_oanda_profile, is_market_open
 from config import load_config, model_dir, current_env, LAST_RETRAIN_FILE, REPORTS_DIR
 from config.pairs import is_crypto
+from config.correlation_groups import group_of
+from core_scoring import (
+    CoreConfig,
+    compute_group_scores,
+    evaluate_group,
+    format_group,
+    group_key,
+)
 from utils.logging_utils import get_logger
 from utils.structured_logger import StructuredLogger
 
@@ -121,6 +129,8 @@ def _resolve_crypto_lots(cli_lots, env_name):
     """加密手数(units)解析：--crypto-lots > run.env 的 DEMO/LIVE_LOT_SIZE_CRYPTO > 缺省(demo 1 / live 0.01)。
 
     加密按 unit 计且支持小数（BTC 最小 0.001 / ETH 最小 0.01），故不做 int 截断。
+    本函数是「通用加密手数」（所有未单独配置的加密品种的兜底），
+    单个品种的独立手数见 _crypto_lots_for()。
     """
     if cli_lots is not None:
         return float(cli_lots)
@@ -132,6 +142,29 @@ def _resolve_crypto_lots(cli_lots, env_name):
         except ValueError:
             pass
     return 0.01 if env_name == "live" else 1.0
+
+
+def _crypto_lots_for(inst):
+    """单个加密品种手数(units)：按品种独立覆盖，缺省回退通用加密手数。
+
+    各加密品种保证金不同（ETH/BTC/LTC/BCH 各不相同），故支持按品种配置，优先级：
+        --crypto-lots
+        > run.env 的 <ENV>_LOT_SIZE_CRYPTO_<INST>   （如 LIVE_LOT_SIZE_CRYPTO_ETH_USD）
+        > run.env 的 <ENV>_LOT_SIZE_CRYPTO          （通用兜底）
+        > 代码缺省(demo 1 / live 0.01)
+    加密按 unit 计且支持小数，故不做 int 截断。
+    """
+    if ARGS.crypto_lots is not None:
+        return float(ARGS.crypto_lots)  # CLI 显式指定：覆盖所有加密品种
+    prefix = "LIVE_LOT_SIZE_CRYPTO" if OANDA_ENV == "live" else "DEMO_LOT_SIZE_CRYPTO"
+    key = f"{prefix}_{str(inst).strip().upper()}"
+    raw = os.getenv(key, "").strip()
+    if raw:
+        try:
+            return float(raw)
+        except ValueError:
+            log.warning(f"⚠️ 环境变量 {key}={raw} 无效，回退通用加密手数")
+    return CRYPTO_LOT_SIZE
 
 
 def _resolve_trade_mode(cli_mode):
@@ -170,6 +203,33 @@ def _resolve_float(env_key, yaml_path, default):
         return float(node)
     except (KeyError, TypeError, ValueError):
         return float(default)
+
+
+def _resolve_bool(env_key, yaml_path, default):
+    """
+    布尔解析，优先级：环境变量 > config.yaml > 内置默认值
+    :param env_key: run.env 中的环境变量名，如 "CORRELATION_CHECK_ENABLED"
+    :param yaml_path: YAML 深层路径，点号分隔，如 "risk.correlation_check_enabled"
+    :param default: 兜底默认值
+    :return: bool 解析结果
+    """
+    raw = os.getenv(env_key, "").strip().lower()
+    if raw:
+        if raw in ("1", "true", "yes", "on"):
+            return True
+        if raw in ("0", "false", "no", "off"):
+            return False
+        log.warning(f"⚠️ 环境变量 {env_key}={raw} 无效，回退到 YAML")
+
+    node = CFG
+    try:
+        for key in yaml_path.split("."):
+            node = node[key]
+        if isinstance(node, bool):
+            return node
+        return str(node).strip().lower() in ("1", "true", "yes", "on")
+    except (KeyError, TypeError):
+        return bool(default)
 
 
 # 中心化日志：主循环用统一 logger，结构化日志记录主动(BOT)操作（按环境分文件）
@@ -224,6 +284,19 @@ MAX_OPEN_PER_GROUP_CRYPTO = int(
 # 全局上限（仅 OVERRIDE_MAX_OPEN=0 时生效；0 表示不限，保持旧行为）
 MAX_OPEN = int(_resolve_float("MAX_OPEN", "risk.max_open", 0))
 
+# 关联组风控：开启后同关联组内已持反向仓位的候选不开（组外一律放行）
+CORRELATION_CHECK_ENABLED = _resolve_bool(
+    "CORRELATION_CHECK_ENABLED", "risk.correlation_check_enabled", True
+)
+# JPY 交叉盘严格模式：True=JPY 组同样拦截反向冲突；False=JPY 组放宽放行
+CORRELATION_JPY_STRICT = _resolve_bool(
+    "CORRELATION_JPY_STRICT", "risk.correlation_jpy_strict", True
+)
+
+# Core 组级门禁（组波动分）：observe=仅日志 / filter=正式拦截
+# 配置项全部来自 run.env（不改动 config.yaml），缺失时回退模块默认值
+CORE_CFG = CoreConfig.from_env()
+
 # 导入：从 forex_oanda 包加载
 from data.fetch_oanda import update_csv
 from features.build_features import add_ta_features
@@ -233,7 +306,7 @@ from execution.oanda_conn import (
     close_position,
     get_open_position,
     has_open_bot_trade,
-    open_bot_instruments,
+    get_open_position_snapshot,
     set_dry_run,
 )
 from execution.risk_gate import enhanced_risk_check, circuit
@@ -258,8 +331,8 @@ RETRAIN_INTERVAL_DAYS = CFG["lgb"]["retrain_interval_days"]
 
 
 def _units_for(inst):
-    """下单手数：加密用独立 CRYPTO_LOT_SIZE，外汇用 LOT_SIZE。"""
-    return CRYPTO_LOT_SIZE if is_crypto(inst) else LOT_SIZE
+    """下单手数：加密用按品种独立解析的手数，外汇用 LOT_SIZE。"""
+    return _crypto_lots_for(inst) if is_crypto(inst) else LOT_SIZE
 
 
 def _vol_threshold_for(inst):
@@ -302,6 +375,28 @@ def _group_max_open(group):
 def _count_open_in_group(positions, group):
     """统计当前 bot 持仓中属于指定分组的数量（positions 为品种列表）。"""
     return sum(1 for inst in positions if _group_for(inst) == group)
+
+
+def _correlation_conflict(cand, snapshot):
+    """判断候选是否与 bot 现有持仓构成「同关联组反向」冲突。
+
+    规则：候选所属关联组内，若已有任意 bot 持仓方向与之相反 → 冲突（旧单优先）。
+    组外品种、或 JPY 组在宽松模式下，一律放行。
+    返回 (blocked, detail)。
+    """
+    grp = group_of(cand["inst"])
+    if not grp:
+        return False, ""
+    if grp == "jpy_cross" and not CORRELATION_JPY_STRICT:
+        return False, ""
+    for inst, pos in snapshot.items():
+        if inst == cand["inst"]:
+            continue
+        if group_of(inst) != grp:
+            continue
+        if pos["direction"] != cand["direction"]:
+            return True, f"同组反向 {inst}={pos['direction']}"
+    return False, ""
 
 
 def _fmt_units(units):
@@ -363,10 +458,12 @@ def analyze_cycle(inst):
     """分析单个品种：处理停牌/风控/平仓/反手，并返回潜在开仓候选。
 
     开仓动作被推迟到分组控仓阶段统一执行，故本函数不直接下单。
-    返回 (result, candidate)：
+    返回 (result, candidate, metrics)：
       result    = {"open","close","observe","fail"}（"open" 恒为 0）
       candidate = None 或 {"inst","group","direction","prob","signal_strength",
                            "units","sl","tp","close","thr_desc","long_thr","short_thr"}
+      metrics   = None 或 {"inst","atr","close"}，供 Core 打分统计「可见品种」波动率池
+                  （即使该品种不开仓，只要有有效数据就计入关联组池）
     """
     result = {"open": 0, "close": 0, "observe": 0, "fail": 0}
     units = _units_for(inst)
@@ -376,7 +473,7 @@ def analyze_cycle(inst):
         log.info(f"🛑 观望 {inst} | 市场停牌 (tag=market_halt)")
         struct_log.skip_signal(inst, "market_halt")
         result["observe"] += 1
-        return result, None
+        return result, None, None
 
     df = update_csv(inst)
     df = add_ta_features(df)
@@ -384,7 +481,12 @@ def analyze_cycle(inst):
     if len(latest) == 0:
         log.warning(f"{inst}: 无有效数据")
         result["fail"] += 1
-        return result, None
+        return result, None, None
+
+    # Core 打分用的「可见性指标」：只要有有效 K 线就计入关联组波动率池
+    atr = float(latest["ta_atr"].iloc[0])
+    close = float(latest["close"].iloc[0])
+    metrics = {"inst": inst, "atr": atr, "close": close}
 
     pkg = load_model(inst)
     feats = pkg["feature_cols"]
@@ -402,7 +504,7 @@ def analyze_cycle(inst):
     if not all(c in latest.columns for c in feats):
         log.warning(f"{inst}: 特征不匹配，跳过")
         result["fail"] += 1
-        return result, None
+        return result, None, metrics
 
     prob = float(pkg["model"].predict(latest[feats])[0])
     ann_vol = calc_garch_vol(df["ta_return_1"].dropna())
@@ -419,10 +521,7 @@ def analyze_cycle(inst):
         struct_log.skip_signal(inst, "risk_limit", detail=reason, prob=prob,
                                prob_long_threshold=long_thr, prob_short_threshold=short_thr)
         result["observe"] += 1
-        return result, None
-
-    atr = float(latest["ta_atr"].iloc[0])
-    close = float(latest["close"].iloc[0])
+        return result, None, metrics
 
     if prob > long_thr:
         if pos["units"] < 0:
@@ -447,15 +546,15 @@ def analyze_cycle(inst):
                     prob_short_threshold=short_thr,
                 )
                 result["observe"] += 1
-                return result, None
+                return result, None, metrics
             sl = close - _atr_sl_mult_for(inst) * atr
             tp = close + _atr_tp_mult_for(inst) * abs(close - sl)
             return result, {
                 "inst": inst, "group": _group_for(inst), "direction": "LONG",
                 "prob": prob, "signal_strength": prob, "units": units,
-                "sl": sl, "tp": tp, "close": close, "thr_desc": thr_desc,
+                "sl": sl, "tp": tp, "close": close, "atr": atr, "thr_desc": thr_desc,
                 "long_thr": long_thr, "short_thr": short_thr,
-            }
+            }, metrics
         log.info(f"⏸️ 观望 {inst} | 概率: {prob:.1%} | 阈值: {thr_desc} | 原因: 已有持仓")
         struct_log.skip_signal(inst, "has_position", prob=prob,
                                prob_long_threshold=long_thr, prob_short_threshold=short_thr)
@@ -483,15 +582,15 @@ def analyze_cycle(inst):
                     prob_short_threshold=short_thr,
                 )
                 result["observe"] += 1
-                return result, None
+                return result, None, metrics
             sl = close + _atr_sl_mult_for(inst) * atr
             tp = close - _atr_tp_mult_for(inst) * abs(sl - close)
             return result, {
                 "inst": inst, "group": _group_for(inst), "direction": "SHORT",
                 "prob": prob, "signal_strength": 1.0 - prob, "units": -units,
-                "sl": sl, "tp": tp, "close": close, "thr_desc": thr_desc,
+                "sl": sl, "tp": tp, "close": close, "atr": atr, "thr_desc": thr_desc,
                 "long_thr": long_thr, "short_thr": short_thr,
-            }
+            }, metrics
         log.info(f"⏸️ 观望 {inst} | 概率: {prob:.1%} | 阈值: {thr_desc} | 原因: 已有持仓")
         struct_log.skip_signal(inst, "has_position", prob=prob,
                                prob_long_threshold=long_thr, prob_short_threshold=short_thr)
@@ -502,7 +601,7 @@ def analyze_cycle(inst):
                                prob_long_threshold=long_thr, prob_short_threshold=short_thr)
         result["observe"] += 1
 
-    return result, None
+    return result, None, metrics
 
 
 def _place_candidate(cand):
@@ -519,17 +618,29 @@ def _place_candidate(cand):
 
 
 def run_cycle(ready):
-    """一轮完整处理：先分析（含平仓/反手），再按分组控仓选最优开仓。
+    """一轮完整处理：先分析（含平仓/反手），再按分组择优开仓。
+
+    流程（Crypto 永远单列，不与外汇争名额）：
+      1) 分析全部品种（含平仓/反手），收集开仓候选 + 各品种波动率指标；
+      2) 所有平仓动作完成后取 bot 持仓快照（供关联冲突判断 + 分组控仓，失败则跳过开仓）；
+      3) 关联冲突过滤（开启时）：同关联组内已有反向持仓的候选不开；
+      4) Core 组级门禁：按关联组计算组波动分（打分不跨组），
+         组波动分 < 阈值则整组放弃本轮（observe 仅日志 / filter 正式拦截）；
+      5) 外汇 / 加密各自按概率（signal_strength）排序取前 N 个开仓
+         （外汇 N=CORE_MAX_PER_GROUP，默认 1/可调 1~3；加密固定 1）。
 
     返回本轮计数 {"open","close","observe","fail"}。
     """
     totals = {"open": 0, "close": 0, "observe": 0, "fail": 0}
     candidates = []
+    pool_metrics = {}  # {inst: {"atr","close"}} —— 本轮全部可见品种，供 Core 打分分池
     for inst in ready:
         try:
-            r, cand = analyze_cycle(inst)
+            r, cand, metrics = analyze_cycle(inst)
             for k in totals:
                 totals[k] += r.get(k, 0)
+            if metrics:
+                pool_metrics[inst] = metrics
             if cand:
                 candidates.append(cand)
         except Exception as e:
@@ -539,14 +650,64 @@ def run_cycle(ready):
     if not candidates:
         return totals
 
-    # 统计当前 bot 已开持仓（查询失败则本轮不开仓，fail-closed）
-    positions = open_bot_instruments()
-    if positions is None:
+    # 全部平仓/反手执行完毕后再取快照，避免把本轮刚平的单误判为持仓
+    snapshot = get_open_position_snapshot()
+    if snapshot is None:
         log.warning("⚠️ 无法读取当前持仓，本轮跳过所有开仓")
         totals["observe"] += len(candidates)
         return totals
+    positions = list(snapshot.keys())
 
-    # 分组控仓：每组只选信号最强（signal_strength 最大）的 1 个开仓
+    # 关联冲突过滤：同关联组内已持反向仓位的候选本轮不开（组外一律放行）
+    if CORRELATION_CHECK_ENABLED:
+        kept = []
+        for c in candidates:
+            blocked, detail = _correlation_conflict(c, snapshot)
+            if blocked:
+                log.info(f"🚫 跳过 {c['inst']} | 关联组冲突: {detail}")
+                struct_log.skip_signal(c["inst"], "correlation_conflict",
+                                       detail=detail, prob=c["prob"],
+                                       prob_long_threshold=c["long_thr"],
+                                       prob_short_threshold=c["short_thr"])
+                totals["observe"] += 1
+            else:
+                kept.append(c)
+        candidates = kept
+    if not candidates:
+        return totals
+
+    # ── Core 组级门禁（阶段2/3）：打分对象 = 关联组，不是品种 ──
+    # 组波动分 = 组内最大相对波动率(ATR/收盘价) / 基准 × 100，低于阈值则整组放弃本轮。
+    # observe 模式：只打日志、不拦截（向后兼容，不改变任何下单行为）；
+    # filter 模式：门禁未通过的组，其全部候选本轮不开仓（与组内个股信号好坏无关）。
+    gate = {}
+    for ge in compute_group_scores(pool_metrics, CORE_CFG):
+        keep, reason = evaluate_group(ge, CORE_CFG)
+        gate[ge["group"]] = (keep, reason)
+        log.info(f"🧮 {format_group(ge, CORE_CFG)}")
+
+    kept = []
+    for c in candidates:
+        if is_crypto(c["inst"]):
+            kept.append(c)  # Crypto 不参与组门禁，保持原有行为
+            continue
+        keep, reason = gate.get(group_key(c["inst"]), (True, "无该组波动数据 → 放行"))
+        if keep or not CORE_CFG.filter_enabled:
+            kept.append(c)
+        else:
+            log.info(f"🚫 跳过 {c['inst']} | 关联组门禁未通过: {reason}")
+            struct_log.skip_signal(
+                c["inst"], "core_group_gate", detail=reason, prob=c["prob"],
+                prob_long_threshold=c["long_thr"],
+                prob_short_threshold=c["short_thr"],
+            )
+            totals["observe"] += 1
+    candidates = kept
+    if not candidates:
+        return totals
+
+    # 择优开仓：外汇池按概率取前 N（CORE_MAX_PER_GROUP，默认 1/可调 1~3）；
+    # Crypto 单列独立名额，保持每轮 1 个；两组均受分组同时持仓上限约束。
     for grp in ("forex", "crypto"):
         grp_candidates = [c for c in candidates if c["group"] == grp]
         if not grp_candidates:
@@ -565,18 +726,21 @@ def run_cycle(ready):
             continue
 
         grp_candidates.sort(key=lambda x: x["signal_strength"], reverse=True)
-        best = grp_candidates[0]
-        log.info(f"✅ {grp} 组最优: {best['inst']} (信号分={best['signal_strength']:.4f}) → 开仓")
-        _place_candidate(best)
-        totals["open"] += 1
-        # 同组落选者计为观望
-        for c in grp_candidates[1:]:
+        slots = 1 if grp == "crypto" else CORE_CFG.max_per_group
+        if grp_limit > 0:
+            slots = min(slots, grp_limit - open_now)
+        chosen = grp_candidates[:max(slots, 0)]
+        for best in chosen:
+            log.info(f"✅ {grp} 组优选: {best['inst']} (信号分={best['signal_strength']:.4f}) → 开仓")
+            _place_candidate(best)
+            totals["open"] += 1
+        for c in grp_candidates[len(chosen):]:
             struct_log.skip_signal(c["inst"], "not_selected",
                                    detail=f"{grp}:lower_strength",
                                    prob=c["prob"],
                                    prob_long_threshold=c["long_thr"],
                                    prob_short_threshold=c["short_thr"])
-        totals["observe"] += len(grp_candidates) - 1
+        totals["observe"] += len(grp_candidates) - len(chosen)
 
     return totals
 
@@ -613,11 +777,23 @@ if __name__ == "__main__":
     except Exception as exc:
         log.warning(f"⚠️ 写入运行时状态失败: {exc}")
     if TRADE_MODE == "crypto":
-        log.info("下单手数: %s units(加密)", _fmt_units(CRYPTO_LOT_SIZE))
+        log.info(
+            "下单手数(加密, units): %s",
+            " | ".join(
+                f"{i}={_fmt_units(_crypto_lots_for(i))}"
+                for i in CFG.get("crypto_instruments", [])
+            ),
+        )
     else:
         log.info(f"下单手数: {LOT_SIZE} units")
         if TRADE_MODE == "forex-crypto":
-            log.info("加密下单手数: %s units", _fmt_units(CRYPTO_LOT_SIZE))
+            log.info(
+                "加密下单手数(units): %s",
+                " | ".join(
+                    f"{i}={_fmt_units(_crypto_lots_for(i))}"
+                    for i in CFG.get("crypto_instruments", [])
+                ),
+            )
     if TRADE_MODE == "crypto":
         log.info(
             "ATR 倍数: SL=%s(加密) | TP=%s(加密)", CRYPTO_SL_MULT, CRYPTO_TP_MULT
@@ -644,7 +820,7 @@ if __name__ == "__main__":
             )
     if OVERRIDE_MAX_OPEN:
         log.info(
-            "分组控仓: 外汇=%s | 加密=%s | 启用=True (每组每轮只开信号最强的 1 个)",
+            "分组控仓: 外汇上限=%s | 加密上限=%s | 启用=True (每组每轮只开信号最强的 1 个)",
             MAX_OPEN_PER_GROUP_FOREX,
             MAX_OPEN_PER_GROUP_CRYPTO,
         )
@@ -653,6 +829,19 @@ if __name__ == "__main__":
             "分组控仓: 启用=False | 全局上限 MAX_OPEN=%s (0=不限)",
             MAX_OPEN or "不限",
         )
+    log.info(
+        "关联组风控: 启用=%s | JPY严格=%s",
+        CORRELATION_CHECK_ENABLED,
+        CORRELATION_JPY_STRICT,
+    )
+    log.info(
+        "Core组级门禁: 模式=%s | 组波动分门槛=%s | 波动基准=%s(等效门槛≈%s) | 外汇每轮名额=%s",
+        CORE_CFG.mode,
+        CORE_CFG.score_threshold,
+        CORE_CFG.group_vol_ref,
+        f"{CORE_CFG.vol_gate:.4%}",
+        CORE_CFG.max_per_group,
+    )
     if DRY_RUN:
         log.warning("🧪 DRY-RUN 模式: 正常运行但不会真正下单/平仓/改单")
 
