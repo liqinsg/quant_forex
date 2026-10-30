@@ -86,7 +86,8 @@ launch_one() {
         cd "${PROJECT_ROOT}"
         # --- REPLACE BOT ENTRY POINT HERE ---
         # Adjust the actual Python script name as needed
-        nohup python3 -u fx_trade_bot_v7.py "$@" >> "${LOG_FILE}" 2>&1
+        nohup python3 -u main_loop_v2.py "$@" >> "${LOG_FILE}" 2>&1
+
     ) &
 
     local NEW_PID=$!
