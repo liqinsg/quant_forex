@@ -83,18 +83,19 @@ def _env_thresholds(inst):
 
 
 def _score_one(inst, granularity):
-    """计算单个品种的 ATR / 收盘价 / 概率，返回「可见品种指标」；数据或模型缺失返回 None。
+    """Compute one instrument's ATR / close / probability and return its "visible-instrument
+    metrics"; returns None when data or the model is missing.
 
-    返回 {"inst","tgrp","direction","prob","signal_strength","atr","close"}，
-    其中 atr/close 用于计算相对波动率（ATR/收盘价），构成关联组打分池。
+    Returns {"inst","tgrp","direction","prob","signal_strength","atr","close"}, where
+    atr/close feed the relative volatility (ATR/close) that builds the correlation-group pool.
     """
     csv_path = data_dir() / f"{inst}_{granularity}.csv"
     model_path = model_dir() / f"lgb_{inst}.pkl"
     if not csv_path.exists() or csv_path.stat().st_size == 0:
-        print(f"  ⚠️ {inst}: 缺少数据 {csv_path.name}（可先运行 ./deploy.sh train）")
+        print(f"  ⚠️ {inst}: missing data {csv_path.name} (run ./deploy.sh train first)")
         return None
     if not model_path.exists():
-        print(f"  ⚠️ {inst}: 缺少模型 {model_path.name}（可先运行 ./deploy.sh train）")
+        print(f"  ⚠️ {inst}: missing model {model_path.name} (run ./deploy.sh train first)")
         return None
 
     try:
@@ -102,13 +103,13 @@ def _score_one(inst, granularity):
         df = add_ta_features(df)
         latest = df.dropna().iloc[-1:]
         if len(latest) == 0:
-            print(f"  ⚠️ {inst}: 有效数据不足，跳过")
+            print(f"  ⚠️ {inst}: not enough valid data, skipping")
             return None
 
         pkg = load_model(inst)
         feats = list(pkg["feature_cols"])
 
-        # TCN 融合（存在即启用，与主循环保持一致）
+        # TCN fusion (enabled whenever the artefact exists; consistent with the main loop)
         try:
             from models.train_tcn_extract import get_latest_seq_feature
 
@@ -120,14 +121,14 @@ def _score_one(inst, granularity):
             pass
 
         if not all(c in latest.columns for c in feats):
-            print(f"  ⚠️ {inst}: 特征不匹配，跳过")
+            print(f"  ⚠️ {inst}: feature mismatch, skipping")
             return None
 
         prob = float(pkg["model"].predict(latest[feats])[0])
         atr = float(latest["ta_atr"].iloc[0])
         close = float(latest["close"].iloc[0])
-    except Exception as exc:  # noqa: BLE001 — 单品种失败不影响整体预览
-        print(f"  ⚠️ {inst}: 计算失败 ({exc})")
+    except Exception as exc:  # noqa: BLE001 — one instrument failing must not break the preview
+        print(f"  ⚠️ {inst}: computation failed ({exc})")
         return None
 
     long_thr, short_thr = _env_thresholds(inst)
@@ -154,17 +155,17 @@ def main():
     instruments = _resolve_instruments(args)
 
     print("=" * 100)
-    print("  Core 组级门禁预览 (preview_core_scores v2.0)")
+    print("  Core group gate preview (preview_core_scores v2.0)")
     print("=" * 100)
-    print(f"  环境      : {current_env()}")
-    print(f"  数据目录  : {data_dir()}")
-    print(f"  模型目录  : {model_dir()}")
+    print(f"  Environment   : {current_env()}")
+    print(f"  Data dir      : {data_dir()}")
+    print(f"  Model dir     : {model_dir()}")
     print(
-        f"  Core 配置 : 模式={CORE_CFG.mode} | 组波动分门槛={CORE_CFG.score_threshold} | "
-        f"波动基准={CORE_CFG.group_vol_ref}(等效门槛≈{CORE_CFG.vol_gate:.4%}) | "
-        f"外汇每轮名额={CORE_CFG.max_per_group}"
+        f"  Core config   : mode={CORE_CFG.mode} | score threshold={CORE_CFG.score_threshold} | "
+        f"vol reference={CORE_CFG.group_vol_ref} (equivalent gate≈{CORE_CFG.vol_gate:.4%}) | "
+        f"FX slots per cycle={CORE_CFG.max_per_group}"
     )
-    print(f"  品种数    : {len(instruments)}")
+    print(f"  Instruments   : {len(instruments)}")
     print("-" * 100)
 
     candidates = []
@@ -174,10 +175,10 @@ def main():
             candidates.append(cand)
 
     if not candidates:
-        print("❌ 无可评分品种（请先准备数据与模型: ./deploy.sh train）")
+        print("❌ No scorable instruments (prepare data and models first: ./deploy.sh train)")
         return 1
 
-    # ── 阶段1：关联组门禁（打分对象 = 关联组；Crypto 不参与）──
+    # ── Stage 1: correlation-group gate (scores the group; crypto excluded) ──
     pool_metrics = {
         c["inst"]: {"atr": c["atr"], "close": c["close"]}
         for c in candidates
@@ -185,7 +186,7 @@ def main():
     }
     groups = compute_group_scores(pool_metrics, CORE_CFG)
 
-    print("\n【关联组门禁】打分对象 = 关联组（打分不跨组）")
+    print("\n[Correlation-group gate] scores the group (never crosses groups)")
     print(f"{'GROUP':<16} {'N':>2} {'MAX_VOL':>9} {'VOL_INST':<10} {'SCORE':>6}  VERDICT")
     print("-" * 100)
     for ge in groups:
@@ -196,38 +197,39 @@ def main():
             f"{ge['vol_inst']:<10} {ge['score']:>6}  {mark} {reason}"
         )
     print("-" * 100)
-    print("  " + format_group(groups[0], CORE_CFG) if groups else "  （无外汇可见品种）")
+    print("  " + format_group(groups[0], CORE_CFG) if groups else "  (no visible FX instruments)")
 
-    # ── 阶段2：候选按概率排序（外汇取前 N；Crypto 单列）──
+    # ── Stage 2: rank candidates by probability (FX takes top N; crypto has its own slot) ──
     forex = [c for c in candidates if c["tgrp"] == "forex" and c["signal_strength"] is not None]
     crypto = [c for c in candidates if c["tgrp"] == "crypto" and c["signal_strength"] is not None]
     forex.sort(key=lambda x: x["signal_strength"], reverse=True)
     crypto.sort(key=lambda x: x["signal_strength"], reverse=True)
 
-    print("\n【外汇候选】(按概率排序，通过门禁的组取前 %d)" % CORE_CFG.max_per_group)
+    print("\n[FX candidates] (sorted by probability; groups passing the gate take top %d)" % CORE_CFG.max_per_group)
     print(f"{'INST':<10} {'DIR':<7} {'PROB':>6} {'STRENGTH':>9}  PICK")
     print("-" * 100)
     for i, c in enumerate(forex):
-        pick = "★ 拟开仓" if i < CORE_CFG.max_per_group else ""
+        pick = "★ would-open" if i < CORE_CFG.max_per_group else ""
         print(
             f"{c['inst']:<10} {c['direction']:<7} {c['prob']:>6.3f} "
             f"{c['signal_strength']:>9.4f}  {pick}"
         )
     if not forex:
-        print("  （无外汇候选）")
+        print("  (no FX candidates)")
 
     if crypto:
-        print("\n【加密候选】(不参与组门禁，单列 1 个)")
+        print("\n[Crypto candidates] (exempt from the group gate, 1 separate slot)")
         print(f"{'INST':<10} {'DIR':<7} {'PROB':>6} {'STRENGTH':>9}  PICK")
         print("-" * 100)
         for i, c in enumerate(crypto):
-            pick = "★ 拟开仓" if i < 1 else ""
+            pick = "★ would-open" if i < 1 else ""
             print(
                 f"{c['inst']:<10} {c['direction']:<7} {c['prob']:>6.3f} "
                 f"{c['signal_strength']:>9.4f}  {pick}"
             )
 
-    print("\n  说明: observe 模式下主循环不会拦截任何候选；filter 模式才会整组剔除。")
+    print("\n  Note: in observe mode the main loop never blocks any candidate; only filter mode "
+          "drops a whole group.")
     print("=" * 100)
     return 0
 

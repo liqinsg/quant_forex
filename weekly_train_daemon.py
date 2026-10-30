@@ -52,82 +52,84 @@ def _mark_updated():
 
 
 def _train_one(inst):
-    """训练单个货币对；失败时记录完整异常并返回 False，不向外抛出。"""
+    """Train a single pair; on failure log the full traceback and return False instead of raising."""
     try:
         run_full_training(inst)
         return True
     except Exception:
-        log.exception(f"❌ {inst} 更新失败（已跳过，将在下个周期重试）")
+        log.exception(f"❌ {inst} update failed (skipped, will retry next cycle)")
         return False
 
 
 def update_missing():
-    """首次启动：只补训缺失的模型。"""
+    """First start: only train the models that are missing."""
     instruments = INSTRUMENTS
     md = model_dir()
     missing = [i for i in instruments if not (md / f"lgb_{i}.pkl").exists()]
     if not missing:
-        log.info(f"✅ 首次检查：{len(instruments)} 个模型均已存在，无需补训")
+        log.info(f"✅ First check: all {len(instruments)} models already exist, nothing to train")
         return [], []
-    log.info(f"🏋️ 首次检查：缺失 {len(missing)}/{len(instruments)} 个，开始补训 ...")
+    log.info(f"🏋️ First check: {len(missing)}/{len(instruments)} missing, starting catch-up training ...")
     ok, failed = [], []
     for i, inst in enumerate(missing, 1):
-        log.info(f"🏋️ 训练 {inst} ... ({i}/{len(missing)})")
+        log.info(f"🏋️ Training {inst} ... ({i}/{len(missing)})")
         (ok if _train_one(inst) else failed).append(inst)
     if ok:
         _mark_updated()
     if failed:
-        log.warning(f"⚠️ 首次补训失败 {len(failed)} 个: {', '.join(failed)}")
+        log.warning(f"⚠️ Initial catch-up training failed for {len(failed)}: {', '.join(failed)}")
     return ok, failed
 
 
 def update_all():
-    """周期性：对全部品种执行增量重训，返回 (成功列表, 失败列表)。"""
+    """Periodic run: incremental retraining of every instrument; returns (ok list, failed list)."""
     instruments = INSTRUMENTS
     ok, failed = [], []
     for i, inst in enumerate(instruments, 1):
-        log.info(f"🏋️ 周度更新 {inst} ... ({i}/{len(instruments)})")
+        log.info(f"🏋️ Weekly update {inst} ... ({i}/{len(instruments)})")
         (ok if _train_one(inst) else failed).append(inst)
     if ok:
         _mark_updated()
-        log.info(f"✅ 周度模型更新完成 — {len(ok)}/{len(instruments)}: {', '.join(ok)}")
+        log.info(f"✅ Weekly model update done — {len(ok)}/{len(instruments)}: {', '.join(ok)}")
     if failed:
-        log.warning(f"⚠️ 失败 {len(failed)} 个（下个周期重试）: {', '.join(failed)}")
+        log.warning(f"⚠️ {len(failed)} failed (retrying next cycle): {', '.join(failed)}")
     return ok, failed
 
 
 def main():
     run_once = "--once" in sys.argv
     log.info(
-        f"🚀 周度训练守护启动 — 环境 {current_env()} | 周期 {INTERVAL_DAYS} 天 | 模型目录 {model_dir()}"
+        f"🚀 Weekly training daemon started — env {current_env()} | interval {INTERVAL_DAYS} days | "
+        f"model dir {model_dir()}"
     )
 
     if run_once:
-        log.info("--once 模式：立即执行一次全量更新")
+        log.info("--once mode: run one full update now")
         ok, failed = update_all()
         total = len(ok) + len(failed)
         if failed and not ok:
-            log.error(f"❌ --once 完成：全部失败 ({len(failed)}/{total})，退出码 2")
+            log.error(f"❌ --once finished: all failed ({len(failed)}/{total}), exit code 2")
             return 2
         if failed:
-            log.warning(f"⚠️ --once 完成：部分失败（成功 {len(ok)} / 失败 {len(failed)}），退出码 1")
+            log.warning(f"⚠️ --once finished: partial failure (ok {len(ok)} / failed {len(failed)}), "
+                        f"exit code 1")
             return 1
-        log.info(f"✅ --once 完成：全部成功 ({len(ok)}/{total})")
+        log.info(f"✅ --once finished: all succeeded ({len(ok)}/{total})")
         return 0
 
     try:
         update_missing()
     except Exception:
-        log.exception("❌ 首次补训出现未预期异常，继续进入周期循环")
+        log.exception("❌ Unexpected error during initial catch-up training; continuing into the cycle loop")
 
     while True:
         sleep_s = 86400 * INTERVAL_DAYS
-        log.info(f"💤 休眠 {INTERVAL_DAYS} 天（{sleep_s}s）后执行下次更新 ...")
+        log.info(f"💤 Sleeping {INTERVAL_DAYS} days ({sleep_s}s) before the next update ...")
         time.sleep(sleep_s)
         try:
             update_all()
         except Exception:
-            log.exception("❌ 本轮更新出现未预期异常，将在下个周期重试")
+            log.exception("❌ Unexpected error during this update; will retry next cycle")
 
 
 if __name__ == "__main__":

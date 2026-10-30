@@ -36,15 +36,27 @@ check_one() {
     local UP="-"
     local LATEST_LOG="-"
 
+#    if [[ -f "${PID_FILE}" ]]; then
+#        PID=$(<"${PID_FILE}")
+#        if kill -0 "${PID}" 2>/dev/null; then
+#            STATUS="${GREEN}RUNNING${NC}"
+#            UP=$(get_uptime "${PID}")
+#        else
+#            STATUS="${YELLOW}DEAD${NC}"
+#        fi
+#    fi
+
     if [[ -f "${PID_FILE}" ]]; then
         PID=$(<"${PID_FILE}")
         if kill -0 "${PID}" 2>/dev/null; then
             STATUS="${GREEN}RUNNING${NC}"
             UP=$(get_uptime "${PID}")
         else
-            STATUS="${YELLOW}DEAD${NC}"
+            STATUS="${YELLOW}DEAD — cleaned${NC}"
+            rm -f "${PID_FILE}"
         fi
     fi
+
 
     # Latest log file
     local LOG_PATH="${LOG_DIR}/${suffix}"

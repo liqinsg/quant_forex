@@ -430,7 +430,7 @@ def main(show_summary=False, env_override=None):
     print("─" * 65)
 
     if not profile["token"]:
-        print("❌ API Token 未配置，退出校验")
+        print("❌ API token is not configured; aborting validation")
         return 1
 
     visible = _discover_accounts(

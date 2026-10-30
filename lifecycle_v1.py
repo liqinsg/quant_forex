@@ -6,7 +6,9 @@ from dataclasses import dataclass
 from typing import Optional
 import pandas as pd
 import numpy as np
+from utils.logging_utils import get_logger
 
+log = get_logger("lifecycle")
 
 LIFECYCLE_VERSION = "v1.0.0"
 
@@ -25,6 +27,10 @@ class LifecycleState:
 
     trend_stage: str        # WARMUP / RANGE / EARLY / DEVELOPING / MATURE / FADING
     warmup_ok: bool
+    # Added: trend-start candle time (ISO string), so the shadow evaluator can compute future
+    # MFE/MAE from both the "trend start" and the "current bar" anchors.
+    # Defaults to None to stay compatible with existing callers.
+    trend_start_ts: Optional[str] = None
 
 
 def _make_trend_id(instrument: str, trend_dir: int, start_ts) -> str:
@@ -46,7 +52,7 @@ def calc_lifecycle(df: pd.DataFrame, instrument: str) -> LifecycleState:
             trend_stage="WARMUP", warmup_ok=False,
         )
 
-    # === 自动适配列名 ===
+    # === Auto-detect column names ===
     def pick_col(candidates):
         for c in candidates:
             if c in df.columns:
@@ -58,12 +64,12 @@ def calc_lifecycle(df: pd.DataFrame, instrument: str) -> LifecycleState:
     ema50_col = pick_col(["ema50", "ema_50", "ema_slow", "ewm50"])
 
     if not all([atr_col, ema20_col, ema50_col]):
-        # 记录缺失列，返回WARMUP不崩溃
+        # Record the missing columns and return WARMUP instead of crashing
         missing = []
         if not atr_col: missing.append("ATR(ta_atr/atr/atr14)")
         if not ema20_col: missing.append("EMA20(ema20/ema_20)")
         if not ema50_col: missing.append("EMA50(ema50/ema_50)")
-        log.warning(f"{instrument}: 缺少生命周期指标: {', '.join(missing)}")
+        log.warning(f"{instrument}: missing lifecycle indicators: {', '.join(missing)}")
         return LifecycleState(
             trend_id="MISSING_COLS", trend_dir=0, trend_age=0,
             trend_strength=0.0, trend_peak_strength=0.0,
@@ -71,12 +77,15 @@ def calc_lifecycle(df: pd.DataFrame, instrument: str) -> LifecycleState:
             trend_stage="WARMUP", warmup_ok=False,
         )
 
-    atr = df[atr_col]
+    # Note: ema20/ema50 (produced by add_ta_features) are already smoothed columns and must
+    # not be ewm-smoothed again here. atr_series / diff are whole-column vectors, not scalars,
+    # so they are named to avoid ambiguity.
+    atr_series = df[atr_col]
     diff = df[ema20_col] - df[ema50_col]
-    # ==================== 以下不变 ====================
+    # ==================== Unchanged from here on ====================
 
-    upper = 0.25 * atr
-    lower = -0.25 * atr
+    upper = 0.25 * atr_series
+    lower = -0.25 * atr_series
 
     trend_dir = np.zeros(len(df), dtype=int)
     current_dir = 0
@@ -106,11 +115,11 @@ def calc_lifecycle(df: pd.DataFrame, instrument: str) -> LifecycleState:
     start_close = float(df["close"].iloc[start_idx])
     trend_age = len(df) - start_idx - 1
 
-    trend_strength_series = diff * latest_dir / atr
+    trend_strength_series = diff * latest_dir / atr_series
     trend_strength = float(trend_strength_series.iloc[-1])
     trend_peak_strength = float(trend_strength_series.iloc[start_idx:].max())
 
-    atr_start = float(atr.iloc[start_idx])
+    atr_start = float(atr_series.iloc[start_idx])
     trend_disp_atr = (
         (float(df["close"].iloc[-1]) - start_close) * latest_dir / atr_start
     )
@@ -138,6 +147,7 @@ def calc_lifecycle(df: pd.DataFrame, instrument: str) -> LifecycleState:
         trend_disp_atr=round(trend_disp_atr, 4),
         strength_chg_5=round(strength_chg_5, 4),
         trend_stage=trend_stage, warmup_ok=True,
+        trend_start_ts=pd.Timestamp(start_ts).isoformat(),
     )
     
 def calc_lifecycle_old(df: pd.DataFrame, instrument: str) -> LifecycleState:
@@ -154,10 +164,10 @@ def calc_lifecycle_old(df: pd.DataFrame, instrument: str) -> LifecycleState:
             trend_stage="WARMUP", warmup_ok=False,
         )
 
-    atr = df["ta_atr"]
+    atr_series = df["ta_atr"]
     diff = df["ema20"] - df["ema50"]
-    upper = 0.25 * atr
-    lower = -0.25 * atr
+    upper = 0.25 * atr_series
+    lower = -0.25 * atr_series
 
     trend_dir = np.zeros(len(df), dtype=int)
     current_dir = 0
@@ -187,11 +197,11 @@ def calc_lifecycle_old(df: pd.DataFrame, instrument: str) -> LifecycleState:
     start_close = float(df["close"].iloc[start_idx])
     trend_age = len(df) - start_idx - 1
 
-    trend_strength_series = diff * latest_dir / atr
+    trend_strength_series = diff * latest_dir / atr_series
     trend_strength = float(trend_strength_series.iloc[-1])
     trend_peak_strength = float(trend_strength_series.iloc[start_idx:].max())
 
-    atr_start = float(atr.iloc[start_idx])
+    atr_start = float(atr_series.iloc[start_idx])
     trend_disp_atr = (
         (float(df["close"].iloc[-1]) - start_close) * latest_dir / atr_start
     )

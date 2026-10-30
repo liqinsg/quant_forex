@@ -3,10 +3,11 @@ import oandapyV20.endpoints.accounts as accounts
 import oandapyV20.endpoints.trades as trades
 from config.config_oanda import get_oanda_profile
 
-# 全局 dry-run 开关：开启后所有下单/平仓调用只返回空响应，不向 OANDA 发送
+# Global dry-run switch: when enabled, every order/close call returns an empty response and
+# nothing is sent to OANDA
 _DRY_RUN = False
 
-# 价格精度缓存：品种 -> displayPrecision（成功查询才缓存）
+# Price precision cache: instrument -> displayPrecision (cached only on a successful query)
 _PRECISION_CACHE = {}
 _BOT_TRADE_TAG = "fx_bot_v7"
 
@@ -27,10 +28,11 @@ def _account_id():
     return get_oanda_profile()["account_id"]
 
 def _price_precision(instrument):
-    """OANDA 价格精度：优先实时查询该品种的 displayPrecision 并缓存。
+    """OANDA price precision: query the instrument's displayPrecision live and cache it.
 
-    覆盖外汇（非日元 5 / 日元 3）与加密（BTC_USD 1 / ETH_USD 2）等所有品种；
-    查询失败时回退到 JPY 启发式（日元 3 位，其余 5 位），且不写入缓存以便下次重试。
+    Covers all instrument types: FX (5 decimals, JPY pairs 3) and crypto (BTC_USD 1,
+    ETH_USD 2). On a failed query it falls back to the JPY heuristic (3 decimals for JPY,
+    5 otherwise) and does not cache, so the next call retries.
     """
     inst = instrument.upper()
     if inst in _PRECISION_CACHE:
@@ -59,7 +61,8 @@ def place_market_order(instrument, units, sl=None, tp=None):
         return {}
     client = get_client()
     p = _price_precision(instrument)
-    # 单位数归一化：整数值发 "10000"/"1"，小数（加密）保留原值如 "0.01"
+    # Normalize units: integral values are sent as "10000"/"1", fractional (crypto) values keep
+    # their original form, e.g. "0.01"
     u = int(units) if float(units).is_integer() else float(units)
     data = {
         "order": {
@@ -93,11 +96,12 @@ def get_open_position(instrument):
 
 
 def get_open_position_snapshot():
-    """按品种聚合当前 bot（tag=fx_bot_v7*）的净持仓方向与数量。
+    """Aggregate the net position direction and size of this bot (tag=fx_bot_v7*) per instrument.
 
-    返回 {instrument: {"direction": "LONG"/"SHORT", "units": 绝对净单位数}}；
-    同一品种多笔 trade 先按 currentUnits 求和再定方向，净额为 0 的品种不返回。
-    查询失败返回 None，调用方据此跳过本轮开仓（fail-closed）。
+    Returns {instrument: {"direction": "LONG"/"SHORT", "units": absolute net units}};
+    multiple trades on the same instrument are summed by currentUnits before the direction is
+    decided, and instruments netting to 0 are omitted.
+    Returns None if the query fails, and the caller then skips opening this cycle (fail-closed).
     """
     try:
         resp = get_client().request(trades.OpenTrades(_account_id()))
@@ -121,7 +125,7 @@ def get_open_position_snapshot():
 
 
 def has_open_bot_trade(instrument, units):
-    """检查是否已存在当前 bot 打开的同品种同方向 open trade。"""
+    """Check whether this bot already has an open trade of the same instrument and direction."""
     direction_sign = 1 if float(units) > 0 else -1
     try:
         resp = get_client().request(trades.OpenTrades(_account_id()))

@@ -3,9 +3,9 @@ import os
 import sys
 from datetime import datetime, timezone
 
-# 可选参数：a/c id（如 101-003-39389016-006）或 1-based 序号。
-# v7 通过 OANDA_ACCOUNT_CLI 桥接进 get_oanda_profile()，优先级最高；
-# 必须在下面解析 Profile 的 import 之前写入环境变量。
+# Optional argument: an a/c id (e.g. 101-003-39389016-006) or a 1-based index.
+# v7 bridges it into get_oanda_profile() via OANDA_ACCOUNT_CLI, which has the highest priority;
+# the environment variable must be set before the Profile import below resolves it.
 if len(sys.argv) > 1 and sys.argv[1].strip():
     os.environ["OANDA_ACCOUNT_CLI"] = sys.argv[1].strip()
 
