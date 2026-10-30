@@ -454,7 +454,10 @@ def _extract_close_trade_id(resp):
         pass
     return ""
 
-def analyze_cycle(inst):
+def analyze_cycle_old(inst):
+    from lifecycle_v1 import calc_lifecycle
+    from lifecycle_logger import write_lifecycle_record
+    
     """分析单个品种：处理停牌/风控/平仓/反手，并返回潜在开仓候选。
 
     开仓动作被推迟到分组控仓阶段统一执行，故本函数不直接下单。
@@ -602,7 +605,352 @@ def analyze_cycle(inst):
         result["observe"] += 1
 
     return result, None, metrics
+def analyze_cycle_old1(inst):
+    from lifecycle_v1 import calc_lifecycle
+    from lifecycle_logger import write_lifecycle_record
 
+    """分析单个品种：处理停牌/风控/平仓/反手，并返回潜在开仓候选。
+
+    开仓动作被推迟到分组控仓阶段统一执行，故本函数不直接下单。
+    返回 (result, candidate, metrics)：
+        result    = {"open","close","observe","fail"}（"open" 恒为 0）
+        candidate = None 或 {"inst","group","direction","prob","signal_strength",
+                            "units","sl","tp","close","thr_desc","long_thr","short_thr"}
+        metrics   = None 或 {"inst","atr","close"}，供 Core 打分统计「可见品种」波动率池
+                     （即使该品种不开仓，只要有有效数据就计入关联组池）
+    """
+    result = {"open": 0, "close": 0, "observe": 0, "fail": 0}
+    units = _units_for(inst)
+
+    # 市场停牌检测：不可交易时与 --dry-run 同样的下单/平仓限制，并打 tag=market_halt
+    if not is_market_open(inst, quiet=True):
+        log.info(f"🛑 观望 {inst} | 市场停牌 (tag=market_halt)")
+        struct_log.skip_signal(inst, "market_halt")
+        result["observe"] += 1
+        return result, None, None
+
+    df = update_csv(inst)
+    df = add_ta_features(df)
+    latest = df.dropna().iloc[-1:]
+    if len(latest) == 0:
+        log.warning(f"{inst}: 无有效数据")
+        result["fail"] += 1
+        return result, None, None
+
+    # ==================================================
+    # 🔭 LIFECYCLE OBSERVER — Zero Side Effect
+    # 仅读数据、写日志、不改任何交易逻辑
+    # ==================================================
+    lifecycle = calc_lifecycle(df, inst)
+
+    # Core 打分用的「可见性指标」：只要有有效 K 线就计入关联组波动率池
+    atr = float(latest["ta_atr"].iloc[0])
+    close = float(latest["close"].iloc[0])
+    metrics = {"inst": inst, "atr": atr, "close": close}
+
+    # ---- Write lifecycle record ----
+    ts_iso = df.index[-1].isoformat()
+    write_lifecycle_record(
+        instrument=inst,
+        state=lifecycle,
+        timestamp=ts_iso,
+        prob=0.0,           # placeholder — filled after model predict
+        group_score=0.0,    # placeholder
+        close_price=close,
+        atr=atr,
+    )
+
+    pkg = load_model(inst)
+    feats = pkg["feature_cols"]
+
+    # TCN 融合（存在即启用）
+    try:
+        from models.train_tcn_extract import get_latest_seq_feature
+        sf = get_latest_seq_feature(inst, df)
+        for k, v in sf.items():
+            latest[k] = v
+        feats = feats + list(sf.keys())
+    except Exception:
+        pass
+
+    if not all(c in latest.columns for c in feats):
+        log.warning(f"{inst}: 特征不匹配，跳过")
+        result["fail"] += 1
+        return result, None, metrics
+
+    prob = float(pkg["model"].predict(latest[feats])[0])
+    ann_vol = calc_garch_vol(df["ta_return_1"].dropna())
+    pos = get_open_position(inst)
+    ok, reason = enhanced_risk_check(ann_vol, 0.05, 0.0, 0, CFG, vol_threshold=_vol_threshold_for(inst))
+
+    long_thr = _prob_long_thr_for(inst)
+    short_thr = _prob_short_thr_for(inst)
+    thr_desc = f"多≥{long_thr:.0%} / 空≤{short_thr:.0%}"
+
+    # ---- Update lifecycle record with real prob ----
+    write_lifecycle_record(
+        instrument=inst,
+        state=lifecycle,
+        timestamp=ts_iso,
+        prob=prob,
+        group_score=0.0,  # fill when you have it
+        close_price=close,
+        atr=atr,
+    )
+
+    if not ok:
+        log.info(f"{inst}: {reason}")
+        log.info(f"⏸️ 观望 {inst} | 概率: {prob:.1%} | 阈值: {thr_desc} | 原因: 风控限制")
+        struct_log.skip_signal(inst, "risk_limit", detail=reason, prob=prob,
+                                prob_long_threshold=long_thr, prob_short_threshold=short_thr)
+        result["observe"] += 1
+        return result, None, metrics
+
+    if prob > long_thr:
+        if pos["units"] < 0:
+            pnl = float(pos["unrealizedPL"])
+            resp = close_position(inst)
+            log.info(f"🔄 平仓 {inst} | 盈亏: {pnl:.2f}")
+            struct_log.bot_close(pair=inst, reason="reverse_to_long",
+                                units=_fmt_units(abs(pos["units"])), exit_price=close,
+                                pnl=pnl, trade_id=_extract_close_trade_id(resp))
+            result["close"] += 1
+        if pos["units"] <= 0:
+            if has_open_bot_trade(inst, units):
+                log.info(
+                    f"⏸️ 观望 {inst} | 概率: {prob:.1%} | 阈值: {thr_desc} | 原因: 已有同向 bot 持仓(tag=fx_bot_v7)"
+                )
+                struct_log.skip_signal(
+                    inst,
+                    "duplicate_bot_trade",
+                    detail="same_direction_open_trade",
+                    prob=prob,
+                    prob_long_threshold=long_thr,
+                    prob_short_threshold=short_thr,
+                )
+                result["observe"] += 1
+                return result, None, metrics
+            sl = close - _atr_sl_mult_for(inst) * atr
+            tp = close + _atr_tp_mult_for(inst) * abs(close - sl)
+            return result, {
+                "inst": inst, "group": _group_for(inst), "direction": "LONG",
+                "prob": prob, "signal_strength": prob, "units": units,
+                "sl": sl, "tp": tp, "close": close, "atr": atr, "thr_desc": thr_desc,
+                "long_thr": long_thr, "short_thr": short_thr,
+            }, metrics
+        log.info(f"⏸️ 观望 {inst} | 概率: {prob:.1%} | 阈值: {thr_desc} | 原因: 已有持仓")
+        struct_log.skip_signal(inst, "has_position", prob=prob,
+                                prob_long_threshold=long_thr, prob_short_threshold=short_thr)
+        result["observe"] += 1
+    elif prob < short_thr:
+        if pos["units"] > 0:
+            pnl = float(pos["unrealizedPL"])
+            resp = close_position(inst)
+            log.info(f"🔄 平仓 {inst} | 盈亏: {pnl:.2f}")
+            struct_log.bot_close(pair=inst, reason="reverse_to_short",
+                                units=_fmt_units(abs(pos["units"])), exit_price=close,
+                                pnl=pnl, trade_id=_extract_close_trade_id(resp))
+            result["close"] += 1
+        if pos["units"] >= 0:
+            if has_open_bot_trade(inst, -units):
+                log.info(
+                    f"⏸️ 观望 {inst} | 概率: {prob:.1%} | 阈值: {thr_desc} | 原因: 已有同向 bot 持仓(tag=fx_bot_v7)"
+                )
+                struct_log.skip_signal(
+                    inst,
+                    "duplicate_bot_trade",
+                    detail="same_direction_open_trade",
+                    prob=prob,
+                    prob_long_threshold=long_thr,
+                    prob_short_threshold=short_thr,
+                )
+                result["observe"] += 1
+                return result, None, metrics
+            sl = close + _atr_sl_mult_for(inst) * atr
+            tp = close - _atr_tp_mult_for(inst) * abs(sl - close)
+            return result, {
+                "inst": inst, "group": _group_for(inst), "direction": "SHORT",
+                "prob": prob, "signal_strength": 1.0 - prob, "units": -units,
+                "sl": sl, "tp": tp, "close": close, "atr": atr, "thr_desc": thr_desc,
+                "long_thr": long_thr, "short_thr": short_thr,
+            }, metrics
+        log.info(f"⏸️ 观望 {inst} | 概率: {prob:.1%} | 阈值: {thr_desc} | 原因: 已有持仓")
+        struct_log.skip_signal(inst, "has_position", prob=prob,
+                                prob_long_threshold=long_thr, prob_short_threshold=short_thr)
+        result["observe"] += 1
+    else:
+        log.info(f"⏸️ 观望 {inst} | 概率: {prob:.1%} | 阈值: {thr_desc} | 原因: 概率区间正常")
+        struct_log.skip_signal(inst, "no_signal", prob=prob,
+                                prob_long_threshold=long_thr, prob_short_threshold=short_thr)
+        result["observe"] += 1
+
+    return result, None, metrics
+
+def analyze_cycle(inst):
+    from lifecycle_v1 import calc_lifecycle
+    from lifecycle_logger import write_lifecycle_record
+
+    """分析单个品种：处理停牌/风控/平仓/反手，并返回潜在开仓候选。
+
+    开仓动作被推迟到分组控仓阶段统一执行，故本函数不直接下单。
+    返回 (result, candidate, metrics)：
+        result    = {"open","close","observe","fail"}（"open" 恒为 0）
+        candidate = None 或 {"inst","group","direction","prob","signal_strength",
+                            "units","sl","tp","close","thr_desc","long_thr","short_thr"}
+        metrics   = None 或 {"inst","atr","close"}，供 Core 打分统计「可见品种」波动率池
+                     （即使该品种不开仓，只要有有效数据就计入关联组池）
+    """
+    result = {"open": 0, "close": 0, "observe": 0, "fail": 0}
+    units = _units_for(inst)
+
+    # 市场停牌检测
+    if not is_market_open(inst, quiet=True):
+        log.info(f"🛑 观望 {inst} | 市场停牌 (tag=market_halt)")
+        struct_log.skip_signal(inst, "market_halt")
+        result["observe"] += 1
+        return result, None, None
+
+    df = update_csv(inst)
+    df = add_ta_features(df)
+    latest = df.dropna().iloc[-1:]
+    if len(latest) == 0:
+        log.warning(f"{inst}: 无有效数据")
+        result["fail"] += 1
+        return result, None, None
+
+    # ==================================================
+    # 🔭 LIFECYCLE OBSERVER — 零侵入观测启动
+    # ==================================================
+    lifecycle = calc_lifecycle(df, inst)
+    ts_iso = df.index[-1].isoformat()
+
+    # Core 指标
+    atr = float(latest["ta_atr"].iloc[0])
+    close = float(latest["close"].iloc[0])
+    metrics = {"inst": inst, "atr": atr, "close": close}
+
+    pkg = load_model(inst)
+    feats = pkg["feature_cols"]
+
+    # TCN 融合
+    try:
+        from models.train_tcn_extract import get_latest_seq_feature
+        sf = get_latest_seq_feature(inst, df)
+        for k, v in sf.items():
+            latest[k] = v
+        feats = feats + list(sf.keys())
+    except Exception:
+        pass
+
+    if not all(c in latest.columns for c in feats):
+        log.warning(f"{inst}: 特征不匹配，跳过")
+        # 无数据时仍写观测记录
+        write_lifecycle_record(
+            instrument=inst, state=lifecycle, timestamp=ts_iso,
+            prob=0.0, group_score=0.0, close_price=close, atr=atr
+        )
+        result["fail"] += 1
+        return result, None, metrics
+
+    prob = float(pkg["model"].predict(latest[feats])[0])
+    ann_vol = calc_garch_vol(df["ta_return_1"].dropna())
+    pos = get_open_position(inst)
+    ok, reason = enhanced_risk_check(ann_vol, 0.05, 0.0, 0, CFG, vol_threshold=_vol_threshold_for(inst))
+
+    long_thr = _prob_long_thr_for(inst)
+    short_thr = _prob_short_thr_for(inst)
+    thr_desc = f"多≥{long_thr:.0%} / 空≤{short_thr:.0%}"
+
+    # ✅ 统一写入：拿到 prob 后一次写全
+    write_lifecycle_record(
+        instrument=inst,
+        state=lifecycle,
+        timestamp=ts_iso,
+        prob=prob,
+        group_score=0.0,  # 后续有 group_score 再填入
+        close_price=close,
+        atr=atr,
+    )
+
+    if not ok:
+        log.info(f"{inst}: {reason}")
+        log.info(f"⏸️ 观望 {inst} | 概率: {prob:.1%} | 阈值: {thr_desc} | 原因: 风控限制")
+        struct_log.skip_signal(inst, "risk_limit", detail=reason, prob=prob,
+                                prob_long_threshold=long_thr, prob_short_threshold=short_thr)
+        result["observe"] += 1
+        return result, None, metrics
+
+    if prob > long_thr:
+        if pos["units"] < 0:
+            pnl = float(pos["unrealizedPL"])
+            resp = close_position(inst)
+            log.info(f"🔄 平仓 {inst} | 盈亏: {pnl:.2f}")
+            struct_log.bot_close(pair=inst, reason="reverse_to_long",
+                                units=_fmt_units(abs(pos["units"])), exit_price=close,
+                                pnl=pnl, trade_id=_extract_close_trade_id(resp))
+            result["close"] += 1
+        if pos["units"] <= 0:
+            if has_open_bot_trade(inst, units):
+                log.info(
+                    f"⏸️ 观望 {inst} | 概率: {prob:.1%} | 阈值: {thr_desc} | 原因: 已有同向 bot 持仓(tag=fx_bot_v7)"
+                )
+                struct_log.skip_signal(
+                    inst, "duplicate_bot_trade", detail="same_direction_open_trade",
+                    prob=prob, prob_long_threshold=long_thr, prob_short_threshold=short_thr,
+                )
+                result["observe"] += 1
+                return result, None, metrics
+            sl = close - _atr_sl_mult_for(inst) * atr
+            tp = close + _atr_tp_mult_for(inst) * abs(close - sl)
+            return result, {
+                "inst": inst, "group": _group_for(inst), "direction": "LONG",
+                "prob": prob, "signal_strength": prob, "units": units,
+                "sl": sl, "tp": tp, "close": close, "atr": atr, "thr_desc": thr_desc,
+                "long_thr": long_thr, "short_thr": short_thr,
+            }, metrics
+        log.info(f"⏸️ 观望 {inst} | 概率: {prob:.1%} | 阈值: {thr_desc} | 原因: 已有持仓")
+        struct_log.skip_signal(inst, "has_position", prob=prob,
+                                prob_long_threshold=long_thr, prob_short_threshold=short_thr)
+        result["observe"] += 1
+    elif prob < short_thr:
+        if pos["units"] > 0:
+            pnl = float(pos["unrealizedPL"])
+            resp = close_position(inst)
+            log.info(f"🔄 平仓 {inst} | 盈亏: {pnl:.2f}")
+            struct_log.bot_close(pair=inst, reason="reverse_to_short",
+                                units=_fmt_units(abs(pos["units"])), exit_price=close,
+                                pnl=pnl, trade_id=_extract_close_trade_id(resp))
+            result["close"] += 1
+        if pos["units"] >= 0:
+            if has_open_bot_trade(inst, -units):
+                log.info(
+                    f"⏸️ 观望 {inst} | 概率: {prob:.1%} | 阈值: {thr_desc} | 原因: 已有同向 bot 持仓(tag=fx_bot_v7)"
+                )
+                struct_log.skip_signal(
+                    inst, "duplicate_bot_trade", detail="same_direction_open_trade",
+                    prob=prob, prob_long_threshold=long_thr, prob_short_threshold=short_thr,
+                )
+                result["observe"] += 1
+                return result, None, metrics
+            sl = close + _atr_sl_mult_for(inst) * atr
+            tp = close - _atr_tp_mult_for(inst) * abs(sl - close)
+            return result, {
+                "inst": inst, "group": _group_for(inst), "direction": "SHORT",
+                "prob": prob, "signal_strength": 1.0 - prob, "units": -units,
+                "sl": sl, "tp": tp, "close": close, "atr": atr, "thr_desc": thr_desc,
+                "long_thr": long_thr, "short_thr": short_thr,
+            }, metrics
+        log.info(f"⏸️ 观望 {inst} | 概率: {prob:.1%} | 阈值: {thr_desc} | 原因: 已有持仓")
+        struct_log.skip_signal(inst, "has_position", prob=prob,
+                                prob_long_threshold=long_thr, prob_short_threshold=short_thr)
+        result["observe"] += 1
+    else:
+        log.info(f"⏸️ 观望 {inst} | 概率: {prob:.1%} | 阈值: {thr_desc} | 原因: 概率区间正常")
+        struct_log.skip_signal(inst, "no_signal", prob=prob,
+                                prob_long_threshold=long_thr, prob_short_threshold=short_thr)
+        result["observe"] += 1
+
+    return result, None, metrics
 
 def _place_candidate(cand):
     """执行单个开仓候选的下单与日志记录。"""
