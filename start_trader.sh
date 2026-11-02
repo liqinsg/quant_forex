@@ -25,6 +25,7 @@ Modes:
   aggressive     Start with run.env_aggressive
   conservative   Start with run.env_conservative
   all            Start ALL THREE in parallel (separate accounts/logs/pids)
+  status         Show status (delegates to ./deploy.sh status)
 
 Flags:
   --dry-run      Override: set DRY_RUN=true (no real orders sent)
@@ -34,6 +35,7 @@ Examples:
   ./start_trader.sh original
   ./start_trader.sh aggressive --dry-run
   ./start_trader.sh all --dry-run
+  ./start_trader.sh status
 EOF
     exit 1
 }
@@ -118,6 +120,9 @@ case "${MODE}" in
         echo ""
         echo "✅ All launched. Check logs/ per suffix."
         echo "To stop: ./stop_trader.sh all"
+        ;;
+    status|--status)
+        exec "${PROJECT_ROOT}/deploy.sh" status
         ;;
     *)
         echo "❌ Unknown mode: ${MODE}"

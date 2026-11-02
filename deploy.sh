@@ -94,9 +94,40 @@ RUN_ENV_FILE=config/run.env
 
 pid_alive() { [[ -f "$1" ]] && kill -0 "$(cat "$1")" 2>/dev/null; }
 
+# 读取 run.env 中某个键的值（去行尾注释 / 首尾空白 / 引号）；找不到返回空
+_run_env_value() {
+    local v
+    v=$(grep -E "^${1}=" "$RUN_ENV_FILE" 2>/dev/null | tail -1 | cut -d'=' -f2-) || v=""
+    v="${v%%#*}"
+    v="${v#"${v%%[![:space:]]*}"}"
+    v="${v%"${v##*[![:space:]]}"}"
+    v="${v%\"}"; v="${v#\"}"; v="${v%\'}"; v="${v#\'}"
+    printf '%s' "$v"
+}
+
+# 运行参数速览：deploy.sh 调用时打印。
+# 注意: 这里展示的是 run.env 的值; 实际生效优先级 命令行参数 > run.env > config.yaml
+show_run_params() {
+    local cli_args="${1:-}"
+    echo "────────────────────────────────────────────────────────────"
+    echo "  运行参数速览  (来源: $RUN_ENV_FILE)"
+    echo "  生效优先级: 命令行参数 > run.env > config.yaml"
+    if [[ -n "$cli_args" ]]; then echo "  CLI 参数    : $cli_args"; fi
+    echo "────────────────────────────────────────────────────────────"
+    echo "  环境/账号   : $(_run_env_value OANDA_ENV) | $(_run_env_value OANDA_ACCOUNT_ID)"
+    echo "  模式/DRY    : $(_run_env_value TRADE_MODE) | $(_run_env_value DRY_RUN)"
+    echo "  信号阈值    : LONG $(_run_env_value PROB_LONG_THRESHOLD) | SHORT $(_run_env_value PROB_SHORT_THRESHOLD)"
+    echo "  ATR SL/TP   : $(_run_env_value STOP_LOSS_ATR_MULTIPLIER) | $(_run_env_value TAKE_PROFIT_ATR_MULTIPLIER)"
+    echo "  关联组检查  : $(_run_env_value CORRELATION_CHECK_ENABLED) | JPY严格 $(_run_env_value CORRELATION_JPY_STRICT)"
+    echo "  Core 门禁   : $(_run_env_value CORE_MODE) | 阈值 $(_run_env_value CORE_SCORE_THRESHOLD) | 择优 $(_run_env_value CORE_MAX_PER_GROUP)"
+    echo "  结构观察    : $(_run_env_value ENABLE_STRUCTURE_OBSERVER)"
+    echo "────────────────────────────────────────────────────────────"
+}
+
 start_bot() {
     use_python
     if pid_alive "$BOT_PID"; then log_warn "主循环已在运行: PID $(cat "$BOT_PID")"; return; fi
+    show_run_params "$*"
     rm -f "$BOT_PID"
     mkdir -p reports
     rm -f reports/bot.runtime      # 清掉上次残留，避免新进程启动前误显示旧状态
@@ -134,6 +165,7 @@ cmd_status() {
     echo "============================================================"
     echo "  $(basename "$PWD")"
     echo "============================================================"
+    show_run_params
 
     local running=0
     local position_env=""
@@ -349,7 +381,7 @@ case "${1:-init}" in
     init) check_python; install_sys_deps; setup_venv; install_python_deps; setup_dirs; setup_env; show_menu ;;
     deps) setup_venv; install_python_deps ;;
     train) train_all "${@:2}" ;;
-    start) use_python; "$PY_BIN" main_loop_v2.py "${@:2}" ;;
+    start) use_python; show_run_params "${*:2}"; "$PY_BIN" main_loop_v2.py "${@:2}" ;;
     daemon) start_bot "${@:2}"; start_weekly ;;
     stop) stop_all ;;
     restart) stop_all; start_bot "${@:2}"; start_weekly ;;

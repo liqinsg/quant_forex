@@ -1293,6 +1293,8 @@ if __name__ == "__main__":
         active = list(forex_inst)
     log.info(f"Trade mode: {TRADE_MODE}")
     log.info(f"Instruments: {', '.join(active) or 'none'}")
+    log.info(f"Structure observer: {'ON' if ENABLE_STRUCTURE_OBSERVER else 'OFF'}"
+             f" (run.env ENABLE_STRUCTURE_OBSERVER={os.getenv('ENABLE_STRUCTURE_OBSERVER', 'unset')})")
     if TRADE_MODE != "forex":
         log.info(f"Crypto volatility threshold: {CRYPTO_VOL_THRESHOLD}")
 
