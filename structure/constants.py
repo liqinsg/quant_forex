@@ -1,0 +1,31 @@
+"""
+Structure Layer Constants
+"""
+
+STRUCTURE_VERSION = "SDS_v1.3"
+
+# Fractal
+FRACTAL_LEFT = 3
+FRACTAL_RIGHT = 3
+
+# Donchian
+DONCHIAN_PERIOD = 50
+
+# TP2
+TP2_LOOKBACK = 200
+
+# Regime
+
+ADX_TREND_THRESHOLD = 25.0
+
+VOLATILE_RATIO = 1.5
+
+COMPRESSED_RATIO = 0.8
+
+# SL
+
+MIN_SL_ATR_MULTIPLIER = 0.5
+
+# Score
+
+MAX_STRENGTH_SCORE = 10

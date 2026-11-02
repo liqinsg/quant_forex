@@ -1,0 +1,3 @@
+"""
+Structure analysis entry point.
+"""
