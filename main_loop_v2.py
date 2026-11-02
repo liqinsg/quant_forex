@@ -304,6 +304,12 @@ CORRELATION_JPY_STRICT = _resolve_bool(
     "CORRELATION_JPY_STRICT", "risk.correlation_jpy_strict", True
 )
 
+# Structure observer (v2.1): when on, signals additionally record structural SL/TP1/regime
+# fields into the lifecycle log. Default off = current logs are byte-for-byte unchanged.
+ENABLE_STRUCTURE_OBSERVER = _resolve_bool(
+    "ENABLE_STRUCTURE_OBSERVER", "structure.enabled", False
+)
+
 # Core group-level gate (group volatility score): observe = log only / filter = actually block
 # All settings come from run.env (config.yaml is untouched); missing values fall back to the
 # module defaults
@@ -322,6 +328,8 @@ from execution.oanda_conn import (
     set_dry_run,
 )
 from execution.risk_gate import enhanced_risk_check, circuit
+from structure.engine import analyze_structure
+from structure.logger_adapter import structure_to_extra
 from arch import arch_model
 from arch.utility.exceptions import (
     ConvergenceWarning,
@@ -912,7 +920,29 @@ def analyze_cycle(inst):
     # ✅ Single write once prob is known (signal_dir is derived from the thresholds for aligned
     # analysis)
     signal_dir = "LONG" if prob > long_thr else ("SHORT" if prob < short_thr else "NEUTRAL")
-    _write_lc(prob, signal_dir)
+
+    # Structure observer (v2.1): observe-only, never blocks the trading flow. Attaches
+    # structural SL/TP1/regime fields when enabled and a concrete direction exists.
+    # MVP: reuse H1 for all frames until dedicated M15/D1 feeds are added.
+    extra = None
+    if ENABLE_STRUCTURE_OBSERVER and signal_dir in ("LONG", "SHORT"):
+        try:
+            analysis = analyze_structure(
+                symbol=inst,
+                side="BUY" if signal_dir == "LONG" else "SELL",
+                entry_price=close,
+                m15_df=df,
+                h1_df=df,
+                d1_df=df,
+            )
+            extra = structure_to_extra(analysis)
+        except ValueError as exc:
+            # No fractal / not enough candles: structure simply unavailable, not a fault.
+            log.debug(f"{inst}: structure unavailable: {exc}")
+        except Exception as exc:  # observation must never block the trading flow
+            log.warning(f"⚠️ {inst}: structure observation failed: {exc}")
+
+    _write_lc(prob, signal_dir, extra=extra)
 
     if not ok:
         log.info(f"{inst}: {reason}")
