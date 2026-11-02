@@ -21,9 +21,9 @@ usage() {
 Usage: ./start_trader.sh <mode> [--dry-run] [--live]
 
 Modes:
-  original       Start with run.env_original
-  aggressive     Start with run.env_aggressive
-  conservative   Start with run.env_conservative
+  original       (-o)  Start with run.env_original
+  aggressive     (-a)  Start with run.env_aggressive
+  conservative   (-c)  Start with run.env_conservative
   status         Show status (pids/<mode>.pid + ./deploy.sh status)
 
 Flags:
@@ -32,7 +32,10 @@ Flags:
 
 Examples:
   ./start_trader.sh original
+  ./start_trader.sh -o                      # 等价于 original
   ./start_trader.sh aggressive --dry-run
+  ./start_trader.sh -a --dry-run            # 等价
+  ./start_trader.sh -c
   ./start_trader.sh status
 EOF
     exit 1
@@ -134,6 +137,13 @@ show_deploy_status() {
 
 MODE="$1"
 shift
+
+# 短参数映射: -o -> original, -a -> aggressive, -c -> conservative
+case "${MODE}" in
+    -o) MODE="original" ;;
+    -a) MODE="aggressive" ;;
+    -c) MODE="conservative" ;;
+esac
 
 case "${MODE}" in
     original|aggressive|conservative)
