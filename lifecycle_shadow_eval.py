@@ -17,6 +17,50 @@ LOOKAHEAD = {
     "72h": 72  # 中长期趋势验证
 }
 
+OUTCOME_VERSION = "v1.0"
+
+# 从 lifecycle 记录原样拷贝的标签字段，让 outcome 文件自包含（归因时无需再 join）
+COPIED_FIELDS = (
+    "trend_id",
+    "trend_dir",
+    "trend_stage",
+    "trend_age",
+    "aligned",
+    "market_regime",
+    "sl_boundary",
+    "sl_basis",
+    "sl_strength",
+    "tp1_boundary",
+    "tp1_basis",
+    "tp1_strength",
+)
+
+
+def signal_direction(rec):
+    """信号方向：LONG=+1 / SHORT=-1；NEUTRAL 回落用趋势方向。"""
+    sdir = rec.get("signal_dir")
+    if sdir == "LONG":
+        return 1
+    if sdir == "SHORT":
+        return -1
+    return rec.get("trend_dir") or 0
+
+
+def shadow_r(rec, close_end, direction):
+    """以结构止损为分母、以 horizon 收盘价为出场的理论 R 值。
+
+    LONG: (exit - entry) / (entry - sl) ; SHORT 反向。
+    缺 sl_boundary、方向与止损位置矛盾（risk <= 0）或缺收盘价时返回 None。
+    """
+    entry, sl = rec.get("close"), rec.get("sl_boundary")
+    if entry is None or sl is None or close_end is None or direction == 0:
+        return None
+    risk = (entry - sl) if direction > 0 else (sl - entry)
+    if risk <= 0:
+        return None
+    reward = (close_end - entry) if direction > 0 else (entry - close_end)
+    return round(reward / risk, 4)
+
 def get_price_df(instrument: str) -> pd.DataFrame:
     """Load cached H1 candles and derive ATR without making a network request."""
     path = data_dir() / f"{instrument}_H1.csv"
@@ -30,30 +74,31 @@ def get_price_df(instrument: str) -> pd.DataFrame:
     return add_ta_features(df.sort_index())
 
 def calc_mfe_mae(df, start_ts, n_bars, trend_dir):
-    """计算未来N根K线MFE/MAE，ATR归一化"""
+    """计算未来N根K线MFE/MAE，ATR归一化。返回 (mfe, mae, close_end)。"""
     try:
         ts = pd.Timestamp(start_ts)
         idx = df.index.get_indexer([ts], method="nearest")[0]
         if idx < 0:
-            return None, None
+            return None, None, None
         time_diff = abs((df.index[idx] - ts).total_seconds())
         if time_diff > 3600 * 3:  # 放宽到3小时容忍
-            return None, None
+            return None, None, None
     except Exception:
-        return None, None
+        return None, None, None
 
     if idx < 0 or idx + n_bars >= len(df):
-        return None, None  # 尾部数据不足
+        return None, None, None  # 尾部数据不足
 
     window = df.iloc[idx : idx + n_bars + 1]
     start_price = float(window["close"].iloc[0])
     atr_col = "ta_atr" if "ta_atr" in window.columns else "atr"
     atr_base = float(window[atr_col].iloc[0])
     if pd.isna(atr_base) or atr_base <= 0:
-        return None, None
+        return None, None, None
 
     high = window["high"].max()
     low = window["low"].min()
+    close_end = float(window["close"].iloc[-1])
 
     if trend_dir == 1:   # LONG基准
         mfe = (high - start_price) / atr_base
@@ -65,7 +110,7 @@ def calc_mfe_mae(df, start_ts, n_bars, trend_dir):
         mfe = max(high - start_price, start_price - low) / atr_base
         mae = max(start_price - low, high - start_price) / atr_base
 
-    return round(mfe, 4), round(mae, 4)
+    return round(mfe, 4), round(mae, 4), close_end
 
 def main():
     outcomes_by_id = {}
@@ -80,6 +125,9 @@ def main():
                     raise ValueError(
                         f"{OUTPUT_LOG}:{line_number}: missing record_id"
                     )
+                # 旧版本（无 outcome_version 或版本不符）不参与复用，下一轮按新口径重算
+                if rec.get("outcome_version") != OUTCOME_VERSION:
+                    continue
                 outcomes_by_id.setdefault(rec["record_id"], {}).update(rec)
 
     new = 0
@@ -110,31 +158,40 @@ def main():
             if "high" not in df.columns or "low" not in df.columns:
                 raise ValueError(f"{inst}: cached candle data is missing high/low columns")
 
-            out = outcomes_by_id.get(rid, {
+            # MFE/MAE 以「信号方向」为基准（NEUTRAL 才回落趋势方向）——归因要的是信号方向
+            direction = signal_direction(rec)
+
+            out = {
                 "record_id": rid,
+                "outcome_version": OUTCOME_VERSION,
                 "timestamp": rec["timestamp"],
                 "instrument": inst,
-                "trend_stage": rec.get("trend_stage"),
-                "trend_age": rec.get("trend_age"),
-                "trend_dir": rec.get("trend_dir"),
                 "signal_dir": rec.get("signal_dir", "NEUTRAL"),
-                "aligned": rec.get("aligned"),
                 "prob": rec.get("prob", 0.0),
-                "group_score": rec.get("group_score", 0.0),
-                "close": rec.get("close"),
+                "entry_price": rec.get("close"),
                 "atr": rec.get("atr"),
-            })
+            }
+            for field in COPIED_FIELDS:
+                if field in rec:
+                    out[field] = rec[field]
+
+            prev = outcomes_by_id.get(rid)
+            if prev:
+                out.update(prev)  # 复用已算好的 horizon
+
             added_outcome = False
             for label, n in LOOKAHEAD.items():
                 mfe_key, mae_key = f"mfe_{label}_atr", f"mae_{label}_atr"
                 if out.get(mfe_key) is not None and out.get(mae_key) is not None:
                     continue
-                mfe, mae = calc_mfe_mae(df, rec["timestamp"], n, rec["trend_dir"])
+                mfe, mae, close_end = calc_mfe_mae(df, rec["timestamp"], n, direction)
                 if mfe is None or mae is None:
                     pending += 1
                     continue
                 out[mfe_key] = mfe
                 out[mae_key] = mae
+                out[f"close_{label}"] = close_end
+                out[f"shadow_r_{label}"] = shadow_r(rec, close_end, direction)
                 added_outcome = True
 
             if added_outcome:
