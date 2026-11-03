@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""结构化日志 — 区分主动(BOT)/被动(OANDA)操作"""
+"""Structured logging — distinguishes active (BOT) from passive (OANDA) operations"""
 import json
 import re
 from datetime import datetime
@@ -11,10 +11,11 @@ LOG_DIR.mkdir(parents=True, exist_ok=True)
 
 
 def _safe_profile_name(name: str) -> str:
-    """把 profile 名转成安全的文件名片段。
+    """Turn a profile name into a safe filename fragment.
 
-    处理 '/'、'\\'、空格、'.' 等可能被当作路径分隔符或非法字符的符号，
-    避免如 'PF-D Structure/D-Gate' 被拼成子目录路径。
+    Handles '/', '\\', spaces, '.' and similar characters that could act as path separators
+    or are illegal in filenames, so a name like 'PF-D Structure/D-Gate' is not turned into a
+    sub-directory path.
     """
     return re.sub(r"[^\w\-]+", "_", name.strip().lower()).strip("_")
 
@@ -32,7 +33,7 @@ class StructuredLogger:
         with open(self.filepath, "a", encoding="utf-8") as f:
             f.write(json.dumps(record, ensure_ascii=False) + "\n")
 
-    # ── 主动操作 ──
+    # ── Active operations ──
     def bot_open(
         self,
         pair: str,
@@ -141,7 +142,7 @@ class StructuredLogger:
             }
         )
 
-    # ── 被动平仓检测 ──
+    # ── Passive close detection ──
     def oanda_close_detected(
         self,
         pair: str,

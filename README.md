@@ -58,7 +58,7 @@ reports/
 | `--forex` / `-f` | **只**交易外汇（默认） |
 | `--crypto` / `-c` | **只**交易加密货币（`BTC_USD`/`ETH_USD`/`LTC_USD`/`BCH_USD`） |
 | `--forex-crypto` / `-b` | 外汇与加密**同时**交易 |
-| `--crypto-lots N` | 加密下单手数 N（unit 计，支持小数）；缺省读 `config/run.env` 的 `DEMO_LOT_SIZE_CRYPTO`/`LIVE_LOT_SIZE_CRYPTO`（demo 1 / live 0.01） |
+| `--crypto-lots N` | 加密下单手数 N（unit 计，支持小数），**一次性覆盖所有加密品种**；不指定时按品种解析 `config/run.env` 的 `DEMO_LOT_SIZE_CRYPTO_<INST>`/`LIVE_LOT_SIZE_CRYPTO_<INST>`，未配置的品种回退通用 `DEMO_LOT_SIZE_CRYPTO`/`LIVE_LOT_SIZE_CRYPTO`（demo 1 / live 0.01） |
 | `--dry-run` | 空跑模式：正常跑完整流程（拉K线→特征→预测→风控），但**不下单/平仓/改单**（不向 OANDA 发送任何订单） |
 
 交易品种模式优先级：CLI（`-f`/`-c`/`-b`，三者互斥）> `run.env` 的 `TRADE_MODE` > 代码默认 `forex`。
@@ -109,7 +109,12 @@ python main_loop_v2.py --dry-run              # 空跑（不下单/平仓）
 > 备注：`LTC_USD` / `BCH_USD` 保证金较低，后续可能作为 live 账号的**专注品种**（视流动性与模型表现再定）。
 
 - **启用方式**：`--forex/-f`（默认）、`--crypto/-c`、`--forex-crypto/-b` 三选一；未指定时以 `run.env` 的 `TRADE_MODE` 为准，均无则默认 `forex`。
-- **手数**：按 unit 计且支持小数，优先级 `--crypto-lots` > `run.env` 的 `DEMO_LOT_SIZE_CRYPTO`/`LIVE_LOT_SIZE_CRYPTO` > 缺省（demo 1 / live 0.01）。
+- **手数**：按 unit 计且支持小数，可**按品种独立配置**（各加密品种保证金不同）。优先级
+  `--crypto-lots`（覆盖所有加密品种）
+  > `run.env` 的 `DEMO_LOT_SIZE_CRYPTO_<INST>`/`LIVE_LOT_SIZE_CRYPTO_<INST>`（按品种，如 `LIVE_LOT_SIZE_CRYPTO_ETH_USD`）
+  > `run.env` 的 `DEMO_LOT_SIZE_CRYPTO`/`LIVE_LOT_SIZE_CRYPTO`（通用兜底）
+  > 缺省（demo 1 / live 0.01）。
+  新增加密品种未单独配置时，自动回退通用值，无需改代码。
   OANDA 最小可交易单位：BTC 0.001、ETH 0.01。
 - **价格精度**：下单 SL/TP 精度改为**实时查询** OANDA 品种 `displayPrecision` 并缓存（BTC=1、ETH=2、日元=3、其余=5），
   避免 `TAKE_PROFIT_ON_FILL_PRICE_PRECISION_EXCEEDED`。

@@ -8,7 +8,8 @@ from utils.logging_utils import get_logger
 log = get_logger("fetch_oanda")
 
 TZ = pytz.timezone(os.getenv("TIMEZONE", "Asia/Singapore"))
-# 首次建库回溯月数（须 >= lgb 训练窗口 + 验证窗口，当前 24+3=27）
+# Lookback months for the initial database build (must be >= LGB training window + validation
+# window, currently 24+3=27)
 DEFAULT_LOOKBACK_MONTHS = 36
 MAX_PAGES = 50
 
@@ -25,10 +26,10 @@ def _candles_to_frame(candles):
     return pd.DataFrame(rows).set_index("time").sort_index()
 
 def fetch_candles(instrument, granularity="H1", count=5000, since=None, lookback_months=DEFAULT_LOOKBACK_MONTHS):
-    """拉取 candles，自动分页绕过 OANDA 单次 5000 根上限。
+    """Fetch candles, paginating automatically to bypass OANDA's 5000-candle-per-call limit.
 
-    since=None 时从 (now - lookback_months) 开始，用于首次建库；
-    否则从 since 开始增量拉取，直到追平最新。
+    When since=None it starts from (now - lookback_months) for the initial full build;
+    otherwise it fetches incrementally from since until it catches up with the latest.
     """
     client = get_client()
     if since is not None:
@@ -45,11 +46,11 @@ def fetch_candles(instrument, granularity="H1", count=5000, since=None, lookback
             break
         frames.append(_candles_to_frame(candles))
         new_last = pd.to_datetime(candles[-1]["time"])
-        # 不足一页说明已到最新；时间未推进则防止死循环
+        # Fewer than a full page means we reached the latest; no time progress guards against loops
         if len(candles) < count or (last_ts is not None and new_last <= last_ts):
             break
         last_ts = new_last
-        cursor = new_last + pd.Timedelta(seconds=1)  # 下一段起点，避免重复边界
+        cursor = new_last + pd.Timedelta(seconds=1)  # next page start, avoids duplicating the boundary
 
     if not frames:
         return pd.DataFrame(columns=["open", "high", "low", "close", "volume", "complete"],
@@ -58,10 +59,12 @@ def fetch_candles(instrument, granularity="H1", count=5000, since=None, lookback
     return df[~df.index.duplicated(keep="last")]
 
 def update_csv(instrument, granularity="H1", lookback_months=DEFAULT_LOOKBACK_MONTHS, env=None):
-    """增量更新 CSV 到 data/<env>/datasets/（env 缺省取当前 OANDA 环境）。
+    """Incrementally update the CSV under data/<env>/datasets/ (env defaults to the current
+    OANDA environment).
 
-    已存在的 CSV 若为空或损坏（如上次训练被中断写坏），自动按全量重建，
-    避免 pd.read_csv 抛 EmptyDataError 中断整批训练。
+    If an existing CSV is empty or corrupt (e.g. truncated by an interrupted training run),
+    it is rebuilt in full, so pd.read_csv cannot raise EmptyDataError and abort a whole
+    training batch.
     """
     path = data_dir(env) / f"{instrument}_{granularity}.csv"
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -72,7 +75,7 @@ def update_csv(instrument, granularity="H1", lookback_months=DEFAULT_LOOKBACK_MO
             df_exist = pd.read_csv(path, index_col="time", parse_dates=["time"])
             df_exist.index = pd.DatetimeIndex(df_exist.index).tz_convert(TZ)
         except (pd.errors.EmptyDataError, pd.errors.ParserError, ValueError) as e:
-            log.warning(f"⚠️ {path.name} 无法解析（{e}），将按全量重建")
+            log.warning(f"⚠️ {path.name} cannot be parsed ({e}); rebuilding in full")
             df_exist = None
 
     if df_exist is not None and len(df_exist) > 0:
@@ -81,10 +84,11 @@ def update_csv(instrument, granularity="H1", lookback_months=DEFAULT_LOOKBACK_MO
         df = df[~df.index.duplicated(keep="last")].sort_index()
     else:
         if path.exists():
-            log.warning(f"⚠️ {path.name} 为空，按全量重建")
+            log.warning(f"⚠️ {path.name} is empty; rebuilding in full")
         df = fetch_candles(instrument, granularity, lookback_months=lookback_months)
 
-    # 原子写入：先写临时文件再替换，避免中途中断留下 0 字节 CSV
+    # Atomic write: write to a temp file then replace, so an interruption cannot leave a
+    # 0-byte CSV behind
     tmp = path.with_suffix(path.suffix + ".tmp")
     df.to_csv(tmp)
     os.replace(tmp, path)

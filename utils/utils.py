@@ -9,7 +9,7 @@ RESET = "\033[0m"
 
 
 def apply_jitter(min_sec: float = 1.0, max_sec: float = 8.0) -> None:
-    """在脚本主逻辑开始前增加抖动延迟，避免并发请求撞车"""
+    """Add a jitter delay before the script's main logic, so concurrent requests do not collide"""
     delay = random.uniform(min_sec, max_sec)
     time.sleep(delay)
 

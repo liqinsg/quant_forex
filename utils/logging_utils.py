@@ -43,38 +43,38 @@ if not logger.handlers:
     logger.addHandler(console_handler)
 
 # ──────────────────────────────────────────────────────────
-# 🔇 中央静音：第三方库全关INFO，只留WARNING+
-# 以后新库加在这里就行
+# 🔇 Central muting: silence INFO on third-party libraries, keep WARNING and above only
+# Add any new library here
 # ──────────────────────────────────────────────────────────
 SILENCE_LIST = [
-    "oandapyV20",              # OANDA的HTTP请求日志
+    "oandapyV20",              # OANDA HTTP request logs
     "oandapyV20.endpoints", 
-    "requests",                # requests库
-    "urllib3",                 # requests底层
-    "httpx",                   # 以防以后换httpx
+    "requests",                # requests library
+    "urllib3",                 # requests transport layer
+    "httpx",                   # in case we switch to httpx later
     "httpcore",                
-    "asyncio",                 # 太吵
+    "asyncio",                 # too noisy
 ]
 
 for _lib in SILENCE_LIST:
     _lib_log = logging.getLogger(_lib)
-    _lib_log.setLevel(logging.WARNING) # INFO以下全干掉
-    _lib_log.propagate = False         # 不往上抛给root logger
+    _lib_log.setLevel(logging.WARNING) # drop everything below INFO
+    _lib_log.propagate = False         # do not bubble up to the root logger
 
 
-# ─── 中央时间函数 ───
+# ─── Central time helpers ───
 def now():
-    """统一入口：获取本地时间"""
+    """Single entry point: get local time"""
     return datetime.now()
 
 
 def today_str():
-    """统一入口：获取本地日期 20250902"""
+    """Single entry point: get local date, e.g. 20250902"""
     return now().strftime("%Y%m%d")
 
 
 def fmt(dt=None, fmt_str="%Y-%m-%d %H:%M:%S"):
-    """统一格式化，带时区名"""
+    """Unified formatting, including the timezone name"""
     dt = dt or now()
     return f"{dt.strftime(fmt_str)} {TZ_NAME}"
 
@@ -83,7 +83,7 @@ def get_logger(name: str = None) -> logging.Logger:
     """Get a shared logger — use in every .py file"""
     if not name or name == "fx_bot":
         return logger
-    # 子 logger：名字带模块名，但 handler/格式由 fx_bot 统一控制
+    # Child logger: named per module, but handlers/format are centrally controlled by fx_bot
     child = logging.getLogger(f"fx_bot.{name}")
     child.propagate = True
     return child
