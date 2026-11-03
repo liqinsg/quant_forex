@@ -245,3 +245,4 @@ models/model_store/live/*
 
 models/model_store/practice/*
 !models/model_store/practice/.gitkeep
+archived/

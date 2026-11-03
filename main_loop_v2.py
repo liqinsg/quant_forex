@@ -329,6 +329,7 @@ from execution.oanda_conn import (
 )
 from execution.risk_gate import enhanced_risk_check, circuit
 from structure.engine import analyze_structure
+from structure.indicators import compute_regime_inputs
 from structure.logger_adapter import structure_to_extra
 from arch import arch_model
 from arch.utility.exceptions import (
@@ -927,6 +928,7 @@ def analyze_cycle(inst):
     extra = None
     if ENABLE_STRUCTURE_OBSERVER and signal_dir in ("LONG", "SHORT"):
         try:
+            adx, atr20, atr120 = compute_regime_inputs(df)
             analysis = analyze_structure(
                 symbol=inst,
                 side="BUY" if signal_dir == "LONG" else "SELL",
@@ -934,6 +936,9 @@ def analyze_cycle(inst):
                 m15_df=df,
                 h1_df=df,
                 d1_df=df,
+                adx=adx,
+                atr20=atr20,
+                atr120=atr120,
             )
             extra = structure_to_extra(analysis)
         except ValueError as exc:

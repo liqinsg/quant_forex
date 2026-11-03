@@ -21,11 +21,10 @@ usage() {
 Usage: ./start_trader.sh <mode> [--dry-run] [--live]
 
 Modes:
-  original       Start with run.env_original
-  aggressive     Start with run.env_aggressive
-  conservative   Start with run.env_conservative
-  all            Start ALL THREE in parallel (separate accounts/logs/pids)
-  status         Show status (delegates to ./deploy.sh status)
+  original       (-o)  Start with run.env_original
+  aggressive     (-a)  Start with run.env_aggressive
+  conservative   (-c)  Start with run.env_conservative
+  status         Show status (pids/<mode>.pid + ./deploy.sh status)
 
 Flags:
   --dry-run      Override: set DRY_RUN=true (no real orders sent)
@@ -33,8 +32,10 @@ Flags:
 
 Examples:
   ./start_trader.sh original
+  ./start_trader.sh -o                      # 等价于 original
   ./start_trader.sh aggressive --dry-run
-  ./start_trader.sh all --dry-run
+  ./start_trader.sh -a --dry-run            # 等价
+  ./start_trader.sh -c
   ./start_trader.sh status
 EOF
     exit 1
@@ -98,6 +99,37 @@ launch_one() {
     sleep 1
 }
 
+# 各 profile 的状态：以本脚本自己的 pids/<mode>.pid 为准
+show_status() {
+    echo "────────────────────────────────────────────────────────────"
+    echo "  交易实例状态  (来源: ${PID_DIR}/<mode>.pid)"
+    echo "────────────────────────────────────────────────────────────"
+    local suffix pid_file pid running=0
+    for suffix in original aggressive conservative; do
+        pid_file="${PID_DIR}/${suffix}.pid"
+        if [[ ! -f "${pid_file}" ]]; then
+            echo "⚪ ${suffix}  未启动"
+            continue
+        fi
+        pid=$(<"${pid_file}")
+        if kill -0 "${pid}" 2>/dev/null; then
+            echo "✅ 🟢 ${suffix}  运行中 PID: ${pid}"
+            running=1
+        else
+            echo "⚠️  ⚪ ${suffix}  未运行 (PID文件存在但进程消失: ${pid})"
+        fi
+    done
+    [[ ${running} -eq 1 ]] || echo "   （当前没有运行中的交易实例）"
+    echo "────────────────────────────────────────────────────────────"
+}
+
+# 再打一份 deploy.sh 概览（周守护 / 模型 / 持仓）。
+# 注意: deploy.sh 里的「主循环」只认 reports/bot.pid, 与上面的 pids/*.pid 不是同一套记录。
+show_deploy_status() {
+    echo "──── deploy.sh status（周守护 / 模型 / 持仓）────"
+    "${PROJECT_ROOT}/deploy.sh" status
+}
+
 # ------------------------------
 # Parse args
 # ------------------------------
@@ -106,23 +138,20 @@ launch_one() {
 MODE="$1"
 shift
 
+# 短参数映射: -o -> original, -a -> aggressive, -c -> conservative
+case "${MODE}" in
+    -o) MODE="original" ;;
+    -a) MODE="aggressive" ;;
+    -c) MODE="conservative" ;;
+esac
+
 case "${MODE}" in
     original|aggressive|conservative)
         launch_one "${MODE}" "$@"
         ;;
-    all)
-        echo "=========================================="
-        echo "🚀 STARTING ALL THREE — parallel mode"
-        echo "=========================================="
-        launch_one original "$@"
-        launch_one aggressive "$@"
-        launch_one conservative "$@"
-        echo ""
-        echo "✅ All launched. Check logs/ per suffix."
-        echo "To stop: ./stop_trader.sh all"
-        ;;
     status|--status)
-        exec "${PROJECT_ROOT}/deploy.sh" status
+        show_status
+        show_deploy_status
         ;;
     *)
         echo "❌ Unknown mode: ${MODE}"
