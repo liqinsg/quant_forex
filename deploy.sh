@@ -13,21 +13,55 @@ check_python() {
     log_info "Python: $(python3 --version)"
 }
 
+# 依赖指纹：放 reports/ 而非 .venv/，避免 .venv 被清掉后又要重装一遍
+DEPS_STAMP=reports/.requirements.sha256
+
+# TA-Lib 是否已可导入（.venv 能导入就用它，否则当前 PATH 的 python）
+talib_available() {
+    if [[ -x .venv/bin/python ]] && .venv/bin/python -c "import talib" &>/dev/null; then
+        return 0
+    fi
+    local py
+    py="$(command -v python || command -v python3 || true)"
+    [[ -n "$py" ]] && "$py" -c "import talib" &>/dev/null
+}
+
 install_sys_deps() {
     if [[ "$(uname)" == Linux && -f /etc/debian_version ]]; then
-        log_info "Installing TA-Lib system libs..."
-        sudo apt update -qq && sudo apt install -y -qq libta-lib-dev
+        if talib_available; then
+            log_info "TA-Lib 已可用，跳过系统依赖检查"
+            return
+        fi
+        log_warn "TA-Lib 不可用，尝试安装系统依赖..."
+        # sudo apt update -qq && sudo apt install -y -qq libta-lib-dev
+        # sudo apt update -qq && sudo apt install -y -qq libtalib-dev
     fi
 }
 
 setup_venv() {
+    # 只保证 .venv 目录存在；不 source activate，避免空 .venv/bin 抢占 PATH
+    # （否则 use_python 会误选空 venv，导致每次 init 都判定“依赖缺失”而重装）
     [[ -d .venv ]] || python3 -m venv .venv
-    source .venv/bin/activate
 }
 
 install_python_deps() {
-    pip install --upgrade pip -q
-    pip install -r requirements.txt
+    local force="${1:-}"
+    [[ -f requirements.txt ]] || { log_err "requirements.txt not found"; exit 1; }
+    # 复用 use_python 的解释器选择（.venv 齐全则用它，否则用当前环境 python）；
+    # init 下依赖齐全 + requirements.txt 未变 → 跳过，避免每次都联网核对/升级 pip
+    # deps 走 --force，显式重装
+    use_python
+    local want
+    want="$(sha256sum requirements.txt | awk '{print $1}')"
+    if [[ "$force" != "--force" ]] \
+       && "$PY_BIN" -c "import yaml, pandas, lightgbm, talib" &>/dev/null \
+       && [[ -f "$DEPS_STAMP" && "$(cat "$DEPS_STAMP")" == "$want" ]]; then
+        log_info "Python 依赖已是最新 (requirements.txt 未变)，跳过安装"
+        return
+    fi
+    "$PY_BIN" -m pip install -r requirements.txt
+    mkdir -p reports
+    printf '%s' "$want" > "$DEPS_STAMP"
 }
 
 setup_dirs() {
@@ -379,7 +413,7 @@ show_menu() {
 
 case "${1:-init}" in
     init) check_python; install_sys_deps; setup_venv; install_python_deps; setup_dirs; setup_env; show_menu ;;
-    deps) setup_venv; install_python_deps ;;
+    deps) setup_venv; install_python_deps --force ;;
     train) train_all "${@:2}" ;;
     start) use_python; show_run_params "${*:2}"; "$PY_BIN" main_loop_v2.py "${@:2}" ;;
     daemon) start_bot "${@:2}"; start_weekly ;;

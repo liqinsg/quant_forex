@@ -2,9 +2,8 @@
 set -euo pipefail
 
 # ==========================================================
-# Forex OANDA v7 — Unified Launcher
-# Supports: original / aggressive / conservative / all
-# Each loads its own env, logs separately, uses distinct account
+# Forex OANDA v7 — Unified Launcher 【FIXED】
+# Fixes: PID capture, stale PID cleanup, log rotation, status validation
 # ==========================================================
 
 PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -13,8 +12,12 @@ ENV_TPL="run.env"
 PID_DIR="${PROJECT_ROOT}/pids"
 LOG_DIR="${PROJECT_ROOT}/logs"
 
-# Ensure runtime dirs exist
+# Runtime dirs
 mkdir -p "${PID_DIR}" "${LOG_DIR}/original" "${LOG_DIR}/aggressive" "${LOG_DIR}/conservative"
+
+# ─── Configurable Retention ───
+MAX_LOGS_PER_MODE=10   # Keep last N log files per mode
+CHECK_PROCESS_NAME="python"  # Validate by process name too
 
 usage() {
     cat << EOF
@@ -24,19 +27,11 @@ Modes:
   original       (-o)  Start with run.env_original
   aggressive     (-a)  Start with run.env_aggressive
   conservative   (-c)  Start with run.env_conservative
-  status         Show status (pids/<mode>.pid + ./deploy.sh status)
+  status         Show full status
 
 Flags:
-  --dry-run      Override: set DRY_RUN=true (no real orders sent)
-  --live         Enable live-mode thresholds (MIN_GAP/ALIGN/CORE rules)
-
-Examples:
-  ./start_trader.sh original
-  ./start_trader.sh -o                      # 等价于 original
-  ./start_trader.sh aggressive --dry-run
-  ./start_trader.sh -a --dry-run            # 等价
-  ./start_trader.sh -c
-  ./start_trader.sh status
+  --dry-run      Override: DRY_RUN=true
+  --live         Enable live-mode thresholds
 EOF
     exit 1
 }
@@ -44,10 +39,29 @@ EOF
 validate_env() {
     local suffix="$1"
     local f="${CONFIG_DIR}/${ENV_TPL}_${suffix}"
-    if [[ ! -f "${f}" ]]; then
-        echo "❌ Missing env file: ${f}"
-        exit 1
-    fi
+    [[ -f "${f}" ]] || { echo "❌ Missing env: ${f}"; exit 1; }
+}
+
+# ─── NEW: Dual-check PID + process name ───
+is_process_running() {
+    local pid="$1"
+    local suffix="$2"
+    # 1. PID exists
+    [[ -d /proc/${pid} ]] || return 1
+    # 2. Command line matches expected process
+    local cmdline
+    cmdline=$(cat /proc/${pid}/cmdline 2>/dev/null | tr '\0' ' ')
+    [[ "${cmdline}" == *"${CHECK_PROCESS_NAME}"* && "${cmdline}" == *"main_loop"* ]] && return 0
+    return 2  # PID reused or wrong process
+}
+
+# ─── NEW: Log rotation ───
+rotate_logs() {
+    local suffix="$1"
+    local mode_log_dir="${LOG_DIR}/${suffix}"
+    mkdir -p "${mode_log_dir}"
+    # Keep only newest MAX_LOGS_PER_MODE, delete older
+    ls -t "${mode_log_dir}"/runner_*.log 2>/dev/null | tail -n +$((MAX_LOGS_PER_MODE + 1)) | xargs -r rm -f
 }
 
 launch_one() {
@@ -59,15 +73,17 @@ launch_one() {
     local LOG_FILE="${LOG_DIR}/${suffix}/runner_$(date +%Y%m%d_%H%M%S).log"
 
     validate_env "${suffix}"
+    rotate_logs "${suffix}"  # ✅ Auto-clean before start
 
-    # Check already running
+    # ─── Check & clean stale PID ───
     if [[ -f "${PID_FILE}" ]]; then
         local OLD_PID
         OLD_PID=$(<"${PID_FILE}")
-        if kill -0 "${OLD_PID}" 2>/dev/null; then
+        if is_process_running "${OLD_PID}" "${suffix}"; then
             echo "⚠️  ${suffix} already running (PID ${OLD_PID}) — skip"
             return 0
         else
+            echo "🧹 Clean stale PID file: ${OLD_PID}"
             rm -f "${PID_FILE}"
         fi
     fi
@@ -75,31 +91,36 @@ launch_one() {
     echo "▶️  Starting [${suffix}] — ${ENV_FILE}"
     echo "   Log: ${LOG_FILE}"
 
-    # Source env + launch in background
-    (
+    # ─── FIXED: Capture REAL child PID, not subshell ───
+    local DRY_RUN_FLAG=false
+    local LIVE_MODE=false
+    [[ " $* " == *"--dry-run"* ]] && DRY_RUN_FLAG=true
+    [[ " $* " == *"--live"* ]] && LIVE_MODE=true
+
+    # Launch in background, capture Python PID directly
+    nohup bash -c "
         set -a
-        # Load base then allow CLI overrides
-        source "${ENV_FILE}"
-        # Apply CLI dry-run override if passed
-        if [[ " $* " == *"--dry-run"* ]]; then
-            DRY_RUN=true
-        fi
-        set +a
-
-        cd "${PROJECT_ROOT}"
-        # --- REPLACE BOT ENTRY POINT HERE ---
-        # Adjust the actual Python script name as needed
-        nohup python3 -u main_loop_v2.py "$@" >> "${LOG_FILE}" 2>&1
-
-    ) &
+        source '${ENV_FILE}'
+        DRY_RUN=${DRY_RUN_FLAG}
+        LIVE_MODE=${LIVE_MODE}
+        cd '${PROJECT_ROOT}'
+        exec python3 -u main_loop_v2.py $@
+    " >> "${LOG_FILE}" 2>&1 &
 
     local NEW_PID=$!
     echo "${NEW_PID}" > "${PID_FILE}"
-    echo "✅ [${suffix}] started — PID ${NEW_PID}"
+
+    # Verify it actually started
     sleep 1
+    if is_process_running "${NEW_PID}" "${suffix}"; then
+        echo "✅ [${suffix}] started — PID ${NEW_PID}"
+    else
+        echo "❌ Start failed! Check log: ${LOG_FILE}"
+        rm -f "${PID_FILE}"
+        exit 1
+    fi
 }
 
-# 各 profile 的状态：以本脚本自己的 pids/<mode>.pid 为准
 show_status() {
     echo "────────────────────────────────────────────────────────────"
     echo "  交易实例状态  (来源: ${PID_DIR}/<mode>.pid)"
@@ -112,19 +133,18 @@ show_status() {
             continue
         fi
         pid=$(<"${pid_file}")
-        if kill -0 "${pid}" 2>/dev/null; then
+        if is_process_running "${pid}" "${suffix}"; then
             echo "✅ 🟢 ${suffix}  运行中 PID: ${pid}"
             running=1
         else
-            echo "⚠️  ⚪ ${suffix}  未运行 (PID文件存在但进程消失: ${pid})"
+            echo "⚠️  ⚪ ${suffix}  未运行 (已清理残留 PID: ${pid})"
+            rm -f "${pid_file}"
         fi
     done
     [[ ${running} -eq 1 ]] || echo "   （当前没有运行中的交易实例）"
     echo "────────────────────────────────────────────────────────────"
 }
 
-# 再打一份 deploy.sh 概览（周守护 / 模型 / 持仓）。
-# 注意: deploy.sh 里的「主循环」只认 reports/bot.pid, 与上面的 pids/*.pid 不是同一套记录。
 show_deploy_status() {
     echo "──── deploy.sh status（周守护 / 模型 / 持仓）────"
     "${PROJECT_ROOT}/deploy.sh" status
@@ -138,7 +158,6 @@ show_deploy_status() {
 MODE="$1"
 shift
 
-# 短参数映射: -o -> original, -a -> aggressive, -c -> conservative
 case "${MODE}" in
     -o) MODE="original" ;;
     -a) MODE="aggressive" ;;
