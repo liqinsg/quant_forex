@@ -178,7 +178,8 @@ stack-data==0.6.3
 starlette==1.7.0
 statsmodels==0.15.0
 sympy==1.13.1
-TA-Lib @ file:///home/conda/feedstock_root/build_artifacts/bld/rattler-build_ta-lib_1791903107/work
+TA-Lib==0.4.28
+#TA-Lib @ file:///home/conda/feedstock_root/build_artifacts/bld/rattler-build_ta-lib_1791903107/work
 tabulate==0.10.0
 telebot==0.0.5
 tenacity==9.1.4
