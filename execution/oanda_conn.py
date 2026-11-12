@@ -24,8 +24,10 @@ def is_dry_run() -> bool:
 def get_client():
     return get_oanda_profile()["oanda_client"]
 
+
 def _account_id():
     return get_oanda_profile()["account_id"]
+
 
 def _price_precision(instrument):
     """OANDA price precision: query the instrument's displayPrecision live and cache it.
@@ -56,6 +58,7 @@ def _trade_comment(instrument, units):
     env = get_oanda_profile()["env"]
     return f"main_loop_v2:{env}:{instrument}:{direction}"
 
+
 def place_market_order(instrument, units, sl=None, tp=None):
     if _DRY_RUN:
         return {}
@@ -76,23 +79,41 @@ def place_market_order(instrument, units, sl=None, tp=None):
             },
         }
     }
-    if sl: data["order"]["stopLossOnFill"] = {"price":f"{sl:.{p}f}","timeInForce":"GTC"}
-    if tp: data["order"]["takeProfitOnFill"] = {"price":f"{tp:.{p}f}","timeInForce":"GTC"}
+    if sl:
+        data["order"]["stopLossOnFill"] = {"price": f"{sl:.{p}f}", "timeInForce": "GTC"}
+    if tp:
+        data["order"]["takeProfitOnFill"] = {
+            "price": f"{tp:.{p}f}",
+            "timeInForce": "GTC",
+        }
     return client.request(orders.OrderCreate(_account_id(), data=data))
+
 
 def close_position(instrument):
     if _DRY_RUN:
         return {}
     client = get_client()
-    return client.request(positions.PositionClose(_account_id(), instrument=instrument,
-        data={"longUnits":"ALL","shortUnits":"ALL"}))
+    return client.request(
+        positions.PositionClose(
+            _account_id(),
+            instrument=instrument,
+            data={"longUnits": "ALL", "shortUnits": "ALL"},
+        )
+    )
+
 
 def get_open_position(instrument):
     try:
-        pos = get_client().request(positions.PositionDetails(_account_id(), instrument))["position"]
-        return {"has_position":float(pos["netUnits"])!=0, "units":float(pos["netUnits"]),
-                "unrealizedPL":float(pos["unrealizedPL"])}
-    except: return {"has_position":False, "units":0, "unrealizedPL":0.0}
+        pos = get_client().request(
+            positions.PositionDetails(_account_id(), instrument)
+        )["position"]
+        return {
+            "has_position": float(pos["netUnits"]) != 0,
+            "units": float(pos["netUnits"]),
+            "unrealizedPL": float(pos["unrealizedPL"]),
+        }
+    except:
+        return {"has_position": False, "units": 0, "unrealizedPL": 0.0}
 
 
 def get_open_position_snapshot():
