@@ -1,0 +1,62 @@
+# Pair Profile configuration (V8.1, frozen: docs/V8.1_Pair_Profile_Engine.md Section 6).
+# style/category are logged in V8.1; volatility_rank/expected_regime are loaded but
+# unused until V8.2.
+default:
+  style: unknown
+  category: unknown
+  volatility_rank: unknown
+  expected_regime: []
+
+EUR_USD:
+  style: mean_reversion
+  category: major
+  volatility_rank: medium
+  expected_regime: [range, transition]
+
+GBP_USD:
+  style: momentum
+  category: major
+  volatility_rank: medium
+  expected_regime: [trend]
+
+AUD_USD:
+  style: mean_reversion
+  category: major
+  volatility_rank: medium
+  expected_regime: [range]
+
+USD_JPY:
+  style: breakout
+  category: major
+  volatility_rank: medium
+  expected_regime: [trend, transition]
+
+GBP_JPY:
+  style: momentum
+  category: cross
+  volatility_rank: high
+  expected_regime: [trend, volatile]
+
+AUD_JPY:
+  style: momentum
+  category: cross
+  volatility_rank: high
+  expected_regime: [trend]
+
+AUD_NZD:
+  style: channel
+  category: cross
+  volatility_rank: low
+  expected_regime: [range]
+
+BTC_USD:
+  style: volatility
+  category: crypto
+  volatility_rank: extreme
+  expected_regime: [volatile, trend]
+
+ETH_USD:
+  style: volatility
+  category: crypto
+  volatility_rank: extreme
+  expected_regime: [volatile, trend]
