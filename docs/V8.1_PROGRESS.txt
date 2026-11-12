@@ -1,0 +1,93 @@
+
+当前我会怎么做
+
+从你给的仓库状态看：
+
+v81 branch
+
+
+已经建立。
+
+所以现在不要写文档了。
+
+直接进入：
+
+Sprint-1
+Task 1.1
+pair_profiles.yaml
+
+Task 1.2
+pair_profiles.py
+
+Task 2.1
+feature flag
+
+Task 2.2
+observer integration
+
+
+这是第一天能完成的部分。
+
+Sprint-2
+Task 3.x
+全部测试
+
+Sprint-3
+Task 4.x
+Identity Verification
+
+
+实际上：
+
+Replay Identity 才是 V8.1 真正的核心验收。
+
+因为 V8.1 的价值不是：
+
+写了 pair_profile
+
+
+而是证明：
+
+ON == OFF
+
+
+交易行为完全相同。
+
+我认为 Phase 0 可以直接删掉
+
+坦白讲：
+
+Task 0.1
+
+Task 0.2
+
+
+属于一次性检查。
+
+没必要长期占据计划书。
+
+我会把：
+
+Phase 0
+
+
+移动到：
+
+Notes
+
+
+然后实施计划直接从：
+
+Phase 1
+
+
+开始。
+
+所以我的结论是：
+
+✅ docs/V8.1_Implementation_Plan.md 已经够用了
+ ✅ 不需要再生成 Jira 风格文档
+ ✅ 新增一个 V8.1_PROGRESS.md 做执行跟踪即可
+ ✅ 现在应该停止写计划，开始开发 pair_profiles.py 和 pair_profiles.yaml 了
+
+按你现在的节奏，我觉得 今天就可以完成 Phase 1 + Phase 2，明天完成测试，后天开始 Replay Identity。

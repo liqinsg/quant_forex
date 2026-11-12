@@ -1,6 +1,7 @@
-# Pair Profile configuration (V8.1, frozen: docs/V8.1_Pair_Profile_Engine.md Section 6).
-# style/category are logged in V8.1; volatility_rank/expected_regime are loaded but
-# unused until V8.2.
+# V8.1 Pair Profile config (frozen: docs/V8.1_Pair_Profile_Engine.md)
+# style/category are logged in V8.1; volatility_rank/expected_regime
+# are loaded but unused until V8.2.
+---
 default:
   style: unknown
   category: unknown

@@ -97,6 +97,7 @@ from config.config_oanda import get_oanda_profile, is_market_open
 from config import load_config, model_dir, current_env, LAST_RETRAIN_FILE, REPORTS_DIR
 from config.pairs import is_crypto
 from config.correlation_groups import group_of
+from config.pair_profiles import get_pair_profile
 from core_scoring import (
     CoreConfig,
     compute_group_scores,
@@ -309,6 +310,9 @@ CORRELATION_JPY_STRICT = _resolve_bool(
 ENABLE_STRUCTURE_OBSERVER = _resolve_bool(
     "ENABLE_STRUCTURE_OBSERVER", "structure.enabled", False
 )
+# V8.1 Pair Profile observer: when on, lifecycle records carry
+# extra["pair_profile"] = {style, category}. Observe-only; default off.
+_V8_PAIR_PROFILE: bool = os.getenv("V8_PAIR_PROFILE", "0") == "1"
 
 # Core group-level gate (group volatility score): observe = log only / filter = actually block
 # All settings come from run.env (config.yaml is untouched); missing values fall back to the
@@ -947,6 +951,19 @@ def analyze_cycle(inst):
         except Exception as exc:  # observation must never block the trading flow
             log.warning(f"⚠️ {inst}: structure observation failed: {exc}")
 
+    # V8.1 Pair Profile observer: observe-only, never blocks the trading flow.
+    # extra is reassigned only on success; setdefault protects earlier observers.
+    if _V8_PAIR_PROFILE:
+        try:
+            prof = get_pair_profile(inst)
+            new_extra = dict(extra or {})
+            new_extra.setdefault(
+                "pair_profile",
+                {"style": prof.style, "category": prof.category},
+            )
+            extra = new_extra  # assign only after success
+        except Exception:
+            log.exception("pair_profile observer failed: %s", inst)
     _write_lc(prob, signal_dir, extra=extra)
 
     if not ok:
@@ -1300,6 +1317,8 @@ if __name__ == "__main__":
     log.info(f"Instruments: {', '.join(active) or 'none'}")
     log.info(f"Structure observer: {'ON' if ENABLE_STRUCTURE_OBSERVER else 'OFF'}"
              f" (run.env ENABLE_STRUCTURE_OBSERVER={os.getenv('ENABLE_STRUCTURE_OBSERVER', 'unset')})")
+    log.info(f"V8 Pair Profile: {'ON' if _V8_PAIR_PROFILE else 'OFF'}"
+             f" (V8_PAIR_PROFILE={os.getenv('V8_PAIR_PROFILE', 'unset')})")
     if TRADE_MODE != "forex":
         log.info(f"Crypto volatility threshold: {CRYPTO_VOL_THRESHOLD}")
 
